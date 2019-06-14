@@ -12,7 +12,7 @@ STATIC_LINK := 1
 
 # For non-default compiler toolchain uncomment and change the following variables
 #CC := gcc-8
-#CXX := g++-8
+CXX := em++
 #AR := gcc-ar-8
 # Or run make with these options
 # $ make CC=gcc-8 CXX=g++-8 AR=gcc-ar-8
@@ -20,17 +20,19 @@ STATIC_LINK := 1
 # We use boost 1.67.
 # Set the BOOST_ROOT environment variable to point to the base install
 # location of the Boost Libraries
-BOOST_DIR := $(BOOST_ROOT)
+# BOOST_DIR := $(BOOST_ROOT)
+BOOST_DIR := /mnt/d/Unicamp/MC404/boost/boost_1_68_0
 # For Various Installation types of Boost Library
 BOOST_INC := $(wildcard $(BOOST_DIR) $(BOOST_DIR)/include)
 
 # These boost libraries must be compiled with: "g++ -std=c++14" or "g++ -std=c++17"
 # For Various Installation types of Boost Library
-BOOST_LIB_DIR := $(wildcard $(BOOST_DIR)/stage/lib $(BOOST_DIR)/lib)
+# BOOST_LIB_DIR := $(wildcard $(BOOST_DIR)/stage/lib $(BOOST_DIR)/lib)
+BOOST_LIB_DIR := /mnt/d/Unicamp/MC404/boost_lib
 
 # Specify only the basename of the Boost libraries
-BOOST_LIBS := boost_program_options \
-              boost_system
+BOOST_LIBS := /mnt/d/Unicamp/MC404/boost_lib/libboost_program_options \
+              /mnt/d/Unicamp/MC404/boost_lib/libboost_system
 
 # Add extra dependency libraries here
 EXTRA_LIBS := -lpthread
@@ -43,7 +45,7 @@ LINK_DIRS := $(addprefix -L,$(BOOST_LIB_DIR))
 
 # Generating the Linker options for dependent libraries
 ifeq ($(STATIC_LINK), 1)
-  LINK_LIBS := $(addprefix -l:lib, $(addsuffix .a, $(BOOST_LIBS))) $(EXTRA_LIBS)
+  LINK_LIBS := $(addsuffix .a, $(BOOST_LIBS)) $(EXTRA_LIBS)
 else
   COMMA := ,
   LINK_DIRS += $(addprefix -Wl$(COMMA)-rpath=, $(BOOST_LIB_DIR))
@@ -55,7 +57,7 @@ BUILD_DIR := build-$(shell uname -s)
 MKDIR_P ?= mkdir -p
 RM := rm -rf
 # Optimization flags.  Use -g for debug.
-OFLAGS := -O3
+OFLAGS := -O3 -Wno-c++11-narrowing  -fno-builtin -D__APPLE__
 
 # Include paths.
 IFLAGS := $(addprefix -I,$(BOOST_INC)) -I.
@@ -78,7 +80,7 @@ $(BUILD_DIR)/%.c.o:  %.c
 # Main target.(only linking)
 $(BUILD_DIR)/$(PROJECT): $(BUILD_DIR)/whisper.cpp.o \
                          $(BUILD_DIR)/librvcore.a
-	$(CXX) -o $@ $^ $(LINK_DIRS) $(LINK_LIBS)
+	$(CXX) -o $@.js $^ $(LINK_DIRS) $(LINK_LIBS)
 
 # List of all CPP sources needed for librvcore.a
 RVCORE_SRCS := IntRegs.cpp CsRegs.cpp instforms.cpp \

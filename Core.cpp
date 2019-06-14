@@ -31,8 +31,8 @@
   typedef __uint128_t Uint128;
 #else
   #include <boost/multiprecision/cpp_int.hpp>
-  boost::multiprecision::int128_t Int128;
-  boost::multiprecision::uint128_t Uint128;
+  typedef boost::multiprecision::int128_t Int128;
+  typedef boost::multiprecision::uint128_t Uint128;
 #endif
 
 #include <string.h>
@@ -6805,7 +6805,8 @@ inline
 void
 feClearAllExceptions()
 {
-  asm("fnclex");  // std::feclearexcept(FE_ALL_EXCEPT);
+  // asm("fnclex");
+  std::feclearexcept(FE_ALL_EXCEPT);
 }
 
 
