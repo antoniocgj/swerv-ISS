@@ -649,7 +649,7 @@ runServer(std::vector<Core<URV>*>& cores, const std::string& serverFile,
     {
       char buffer[512];
       char* p = buffer;
-#ifdef __APPLE__
+#if defined __APPLE__ || defined __EMSCRIPTEN__
       strerror_r(errno, buffer, 512);
 #else
       p = strerror_r(errno, buffer, 512);
@@ -1007,14 +1007,20 @@ session(const Args& args, const CoreConfig& config)
 }
 
 
+#ifdef __EMSCRIPTEN__
+  #include <emscripten.h>
+#endif
+
 int
 main(int argc, char* argv[])
 {
 
+#ifdef __EMSCRIPTEN__
   EM_ASM(
     FS.mkdir('/working');
     FS.mount(NODEFS, { root: '.' }, '/working');
   );
+#endif
 
   Args args;
   if (not parseCmdLineArgs(argc, argv, args))

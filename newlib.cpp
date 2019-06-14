@@ -307,7 +307,12 @@ Core<URV>::emulateNewlib()
 	if (rv < 0)
 	  {
 	    char buffer[512];
-	    char* p = strerror_r(errno, buffer, 512);
+		char* p = buffer;
+#if defined __APPLE__ || defined __EMSCRIPTEN__
+	    strerror_r(errno, buffer, 512);
+#else
+		p = strerror_r(errno, buffer, 512);
+#endif
 	    std::cerr << p << '\n';
 	  }
 	return URV(rv);

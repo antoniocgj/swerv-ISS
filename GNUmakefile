@@ -57,7 +57,7 @@ BUILD_DIR := build-$(shell uname -s)
 MKDIR_P ?= mkdir -p
 RM := rm -rf
 # Optimization flags.  Use -g for debug.
-OFLAGS := -O3 -Wno-c++11-narrowing  -fno-builtin -D__APPLE__
+OFLAGS := -O3 -Wno-c++11-narrowing  -fno-builtin -D__EMSCRIPTEN__
 
 # Include paths.
 IFLAGS := $(addprefix -I,$(BOOST_INC)) -I.

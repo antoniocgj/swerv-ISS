@@ -791,6 +791,7 @@ Core<URV>::decode(uint32_t inst, uint32_t& op0, uint32_t& op1, uint32_t& op2,
       return instTable_.getEntry(InstId::illegal);
 
     l11:  // 01011  R-form atomics
+	{
       if (not isRva())
 	return instTable_.getEntry(InstId::illegal);
 
@@ -827,7 +828,8 @@ Core<URV>::decode(uint32_t inst, uint32_t& op0, uint32_t& op1, uint32_t& op2,
 	  if (top5 == 0x18) return instTable_.getEntry(InstId::amominu_d);
 	  if (top5 == 0x1c) return instTable_.getEntry(InstId::amomaxu_d);
 	}
-      return instTable_.getEntry(InstId::illegal);
+	}
+	  return instTable_.getEntry(InstId::illegal);
 
     l12:  // 01100  R-form
       {
