@@ -88,8 +88,8 @@ Core<URV>::Core(unsigned hartId, Memory& memory, unsigned intRegCount)
   regionHasLocalDataMem_.resize(16);
   regionHasLocalInstMem_.resize(16);
 
-  decodeCacheSize_ = 4096;
-  decodeCacheMask_ = 0xfff;
+  decodeCacheSize_ = 64*1024;
+  decodeCacheMask_ = 0xffff;
   decodeCache_.resize(decodeCacheSize_);
 
   // Tie the retired instruction and cycle counter CSRs to variables
@@ -2745,6 +2745,10 @@ Core<URV>::setTargetProgramArgs(const std::vector<std::string>& args)
   if (not peekIntReg(RegSp, sp))
     return false;
 
+  // Make sp 16-byte aligned.
+  if ((sp & 0xf) != 0)
+    sp -= (sp & 0xf);
+
   // Push the arguments on the stack recording their addresses.
   std::vector<URV> addresses;  // Address of the argv strings.
   for (const auto& arg : args)
@@ -2773,16 +2777,18 @@ Core<URV>::setTargetProgramArgs(const std::vector<std::string>& args)
     return false;
 
   // Push argv entries on the stack.
-  sp -= URV(addresses.size()) * sizeof(URV); // Make room for argv
-  URV ix = 0;
+  sp -= URV(addresses.size() + 1) * sizeof(URV); // Make room for argv & argc
+  if ((sp & 0xf) != 0)
+    sp -= (sp & 0xf);  // Make sp 16-byte aligned.
+
+  URV ix = 1;  // Index 0 is for argc
   for (const auto addr : addresses)
     {
       if (not memory_.poke(sp + ix++*sizeof(URV), addr))
 	return false;
     }
 
-  // Push argc on the stack.
-  sp -= sizeof(URV);
+  // Put argc on the stack.
   if (not memory_.poke(sp, URV(args.size())))
     return false;
 
@@ -5218,7 +5224,7 @@ template <typename URV>
 void
 Core<URV>::execXori(const DecodedInst* di)
 {
-  URV v = intRegs_.read(di->op1()) ^ SRV(di->op2());
+  URV v = intRegs_.read(di->op1()) ^ SRV(di->op2AsInt());
   intRegs_.write(di->op0(), v);
 }
 

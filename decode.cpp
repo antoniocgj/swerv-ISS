@@ -123,6 +123,11 @@ Core<URV>::decodeFp(uint32_t inst, uint32_t& op0, uint32_t& op1, uint32_t& op2,
       if (f3 == 0)  return instTable_.getEntry(InstId::fmin_s);
       if (f3 == 1)  return instTable_.getEntry(InstId::fmax_s);
     }
+  if (f7 == 0x20)
+    {
+      if (op2 == 1) return instTable_.getEntry(InstId::fcvt_s_d);
+      return instTable_.getEntry(InstId::illegal);
+    }
   if (f7 == 0x50)
     {
       if (f3 == 0)  return instTable_.getEntry(InstId::fle_s);
@@ -590,11 +595,11 @@ Core<URV>::decode(uint32_t inst, uint32_t& op0, uint32_t& op1, uint32_t& op2,
 	RFormInst rform(inst);
 	op0 = rform.bits.rd, op1 = rform.bits.rs1, op2 = rform.bits.rs2;
 	unsigned funct7 = rform.bits.funct7;
+	op3 = funct7 >> 2;
 	if ((funct7 & 3) == 0)
-	  {
-	    op3 = funct7 >> 2;
-	    return instTable_.getEntry(InstId::fmadd_s);
-	  }
+	  return instTable_.getEntry(InstId::fmadd_s);
+	if ((funct7 & 3) == 1)
+	  return instTable_.getEntry(InstId::fmadd_d);
       }
       return instTable_.getEntry(InstId::illegal);
 
@@ -603,11 +608,11 @@ Core<URV>::decode(uint32_t inst, uint32_t& op0, uint32_t& op1, uint32_t& op2,
 	RFormInst rform(inst);
 	op0 = rform.bits.rd, op1 = rform.bits.rs1, op2 = rform.bits.rs2;
 	unsigned funct7 = rform.bits.funct7;
+	op3 = funct7 >> 2;
 	if ((funct7 & 3) == 0)
-	  {
-	    op3 = funct7 >> 2;
-	    return instTable_.getEntry(InstId::fmsub_s);
-	  }
+	  return instTable_.getEntry(InstId::fmsub_s);
+	if ((funct7 & 3) == 1)
+	  return instTable_.getEntry(InstId::fmsub_d);
       }
       return instTable_.getEntry(InstId::illegal);
 
@@ -616,11 +621,11 @@ Core<URV>::decode(uint32_t inst, uint32_t& op0, uint32_t& op1, uint32_t& op2,
 	RFormInst rform(inst);
 	op0 = rform.bits.rd, op1 = rform.bits.rs1, op2 = rform.bits.rs2;
 	unsigned funct7 = rform.bits.funct7;
+	op3 = funct7 >> 2;
 	if ((funct7 & 3) == 0)
-	  {
-	    op3 = funct7 >> 2;
-	    return instTable_.getEntry(InstId::fnmsub_s);
-	  }
+	  return instTable_.getEntry(InstId::fnmsub_s);
+	if ((funct7 & 3) == 1)
+	  return instTable_.getEntry(InstId::fnmsub_d);
       }
       return instTable_.getEntry(InstId::illegal);
 
@@ -629,11 +634,11 @@ Core<URV>::decode(uint32_t inst, uint32_t& op0, uint32_t& op1, uint32_t& op2,
 	RFormInst rform(inst);
 	op0 = rform.bits.rd, op1 = rform.bits.rs1, op2 = rform.bits.rs2;
 	unsigned funct7 = rform.bits.funct7;
+	op3 = funct7 >> 2;
 	if ((funct7 & 3) == 0)
-	  {
-	    op3 = funct7 >> 2;
-	    return instTable_.getEntry(InstId::fnmadd_s);
-	  }
+	  return instTable_.getEntry(InstId::fnmadd_s);
+	if ((funct7 & 3) == 1)
+	  return instTable_.getEntry(InstId::fnmadd_d);
       }
       return instTable_.getEntry(InstId::illegal);
 
