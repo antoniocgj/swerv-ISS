@@ -21,18 +21,19 @@ CXX := em++
 # Set the BOOST_ROOT environment variable to point to the base install
 # location of the Boost Libraries
 # BOOST_DIR := $(BOOST_ROOT)
-BOOST_DIR := /mnt/d/Unicamp/MC404/boost/boost_1_68_0
+BOOST_DIR := /home/msc2017/ra134985/Documents/MC404_web/boost_1_68_0
 # For Various Installation types of Boost Library
 BOOST_INC := $(wildcard $(BOOST_DIR) $(BOOST_DIR)/include)
 
 # These boost libraries must be compiled with: "g++ -std=c++14" or "g++ -std=c++17"
 # For Various Installation types of Boost Library
 # BOOST_LIB_DIR := $(wildcard $(BOOST_DIR)/stage/lib $(BOOST_DIR)/lib)
-BOOST_LIB_DIR := /mnt/d/Unicamp/MC404/boost_lib
+BOOST_LIB_DIR := /home/msc2017/ra134985/Documents/MC404_web/boost_1_68_0/stage/lib
 
 # Specify only the basename of the Boost libraries
-BOOST_LIBS := /mnt/d/Unicamp/MC404/boost_lib/libboost_program_options \
-              /mnt/d/Unicamp/MC404/boost_lib/libboost_system
+BOOST_LIBS := /home/msc2017/ra134985/Documents/MC404_web/boost_1_68_0/stage/lib/libboost \
+# BOOST_LIBS := /mnt/d/Unicamp/MC404/boost_lib/libboost_program_options \
+              # /mnt/d/Unicamp/MC404/boost_lib/libboost_system
 
 # Add extra dependency libraries here
 EXTRA_LIBS := -lpthread
@@ -129,4 +130,3 @@ cscope:
 	( find . \( -name \*.cpp -or -name \*.hpp -or -name \*.c -or -name \*.h \) -print | xargs cscope -b ) && cscope -d && $(RM) cscope.out
 
 .PHONY: install clean help cscope
-

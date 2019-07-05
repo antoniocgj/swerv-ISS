@@ -1,17 +1,17 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2018 Western Digital Corporation or its affiliates.
-// 
+//
 // This program is free software: you can redistribute it and/or modify it
 // under the terms of the GNU General Public License as published by the Free
 // Software Foundation, either version 3 of the License, or (at your option)
 // any later version.
-// 
+//
 // This program is distributed in the hope that it will be useful, but WITHOUT
 // ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
 // FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
 // more details.
-// 
+//
 // You should have received a copy of the GNU General Public License along with
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
@@ -131,7 +131,7 @@ struct Args
   uint64_t toHost = 0;
   uint64_t consoleIo = 0;
   uint64_t instCountLim = ~uint64_t(0);
-  
+
   unsigned regWidth = 32;
   unsigned harts = 1;
   unsigned pageSize = 4*1024;
@@ -1007,21 +1007,9 @@ session(const Args& args, const CoreConfig& config)
 }
 
 
-#ifdef __EMSCRIPTEN__
-  #include <emscripten.h>
-#endif
-
 int
 main(int argc, char* argv[])
 {
-
-#ifdef __EMSCRIPTEN__
-  EM_ASM(
-    FS.mkdir('/working');
-    FS.mount(NODEFS, { root: '.' }, '/working');
-  );
-#endif
-
   Args args;
   if (not parseCmdLineArgs(argc, argv, args))
     return 1;
@@ -1079,6 +1067,6 @@ main(int argc, char* argv[])
       std::cerr << e.what() << '\n';
       ok = false;
     }
-	
+
   return ok? 0 : 1;
 }
