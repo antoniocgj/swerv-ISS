@@ -1,17 +1,17 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2018 Western Digital Corporation or its affiliates.
-// 
+//
 // This program is free software: you can redistribute it and/or modify it
 // under the terms of the GNU General Public License as published by the Free
 // Software Foundation, either version 3 of the License, or (at your option)
 // any later version.
-// 
+//
 // This program is distributed in the hope that it will be useful, but WITHOUT
 // ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
 // FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
 // more details.
-// 
+//
 // You should have received a copy of the GNU General Public License along with
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
@@ -23,7 +23,10 @@
 #include <cstddef>
 #include <vector>
 #include <type_traits>
-#include <unordered_map>
+#include <map>
+#include <string>
+#include <sstream>
+#include <iostream>
 
 namespace WdRiscv
 {
@@ -164,7 +167,7 @@ namespace WdRiscv
     /// Destructor.
     ~FpRegs()
     { regs_.clear(); }
-    
+
     /// Return value of ith register.
     FRV read(unsigned i) const
     { return regs_[i]; }
@@ -285,13 +288,13 @@ namespace WdRiscv
       SpPad sp;
       double dp;
     };
-	
+
   private:
 
     std::vector<FRV> regs_;
     int lastWrittenReg_ = -1;  // Register accessed in most recent write.
     FRV originalValue_ = 0;    // Original value of last written reg.
-    std::unordered_map<std::string, FpRegNumber> nameToNumber_;
+    std::map<std::string, FpRegNumber> nameToNumber_;
     std::vector<std::string> numberToAbiName_;
     std::vector<std::string> numberToName_;
   };
