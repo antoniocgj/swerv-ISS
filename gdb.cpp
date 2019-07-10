@@ -118,7 +118,40 @@ getStringComponents(const std::string& str, char delim1, char delim2,
   return true;
 }
 
+#ifdef __EMSCRIPTEN__
 
+#include <emscripten.h>
+
+EM_JS(const char *, readFromGDB, (), {
+	var jsString = getDebugMsg();
+  var lengthBytes = lengthBytesUTF8(jsString)+1;
+  var stringOnWasmHeap = _malloc(lengthBytes);
+  stringToUTF8(jsString, stringOnWasmHeap, lengthBytes);
+  return stringOnWasmHeap;
+});
+
+EM_JS(void, writeToGDB, (const char * str), {
+	var jsString = UTF8ToString(str);
+	sendDebugMsg(jsString);
+});
+
+static
+std::string
+receivePacketFromGdb(){
+	const char* dataC = readFromGDB();
+	std::string data(dataC);
+	free((char *)dataC);
+	return data;
+}
+
+static void
+sendPacketToGdb(const std::string& data)
+{
+	writeToGDB(data.c_str());
+}
+
+
+#else
 // Receive a packet from gdb. Request a retransmit from gdb if packet
 // checksum is incorrect. Return succesfully received packet.
 static
@@ -223,6 +256,7 @@ sendPacketToGdb(const std::string& data)
     }
 }
 
+#endif
 
 /// Return hexadecimal representation of given integer register value.
 template <typename T>
