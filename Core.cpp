@@ -65,16 +65,16 @@ parseNumber(const std::string& numberStr, TYPE& number)
     {
       char* end = nullptr;
       if (sizeof(TYPE) == 4)
-	number = strtoul(numberStr.c_str(), &end, 0);
+        number = strtoul(numberStr.c_str(), &end, 0);
       else if (sizeof(TYPE) == 8)
-	number = strtoull(numberStr.c_str(), &end, 0);
+        number = strtoull(numberStr.c_str(), &end, 0);
       else
-	{
-	  std::cerr << "parseNumber: Only 32/64-bit RISCV cores supported\n";
-	  return false;
-	}
+        {
+          std::cerr << "parseNumber: Only 32/64-bit RISCV cores supported\n";
+          return false;
+        }
       if (end and *end)
-	good = false;  // Part of the string are non parseable.
+        good = false;  // Part of the string are non parseable.
     }
   return good;
 }
@@ -140,7 +140,7 @@ Core<URV>::getImplementedCsrs(std::vector<CsrNumber>& vec) const
     {
       CsrNumber csrn = CsrNumber(i);
       if (csRegs_.getImplementedCsr(csrn))
-	vec.push_back(csrn);
+        vec.push_back(csrn);
     }
 }
 
@@ -176,57 +176,57 @@ Core<URV>::reset(bool resetMemoryMappedRegs)
   if (peekCsr(CsrNumber::MISA, value))
     {
       if (value & 1)    // Atomic ('a') option.
-	rva_ = true;
+        rva_ = true;
 
       if (value & (URV(1) << ('c' - 'a')))  // Compress option.
-	rvc_ = true;
+        rvc_ = true;
 
       if (value & (URV(1) << ('f' - 'a')))  // Single precision FP
-	{
-	  rvf_ = true;
+        {
+          rvf_ = true;
 
-	  bool isDebug = false;
+          bool isDebug = false;
 
-	  // Make sure FCSR/FRM/FFLAGS are enabled if F extension is on.
-	  if (not csRegs_.getImplementedCsr(CsrNumber::FCSR))
-	    csRegs_.configCsr("fcsr", true, 0, 0xff, 0xff, isDebug);
-	  if (not csRegs_.getImplementedCsr(CsrNumber::FRM))
-	    csRegs_.configCsr("frm", true, 0, 0x7, 0x7, isDebug);
-	  if (not csRegs_.getImplementedCsr(CsrNumber::FFLAGS))
-	    csRegs_.configCsr("fflags", true, 0, 0x1f, 0x1f, isDebug);
-	}
+          // Make sure FCSR/FRM/FFLAGS are enabled if F extension is on.
+          if (not csRegs_.getImplementedCsr(CsrNumber::FCSR))
+            csRegs_.configCsr("fcsr", true, 0, 0xff, 0xff, isDebug);
+          if (not csRegs_.getImplementedCsr(CsrNumber::FRM))
+            csRegs_.configCsr("frm", true, 0, 0x7, 0x7, isDebug);
+          if (not csRegs_.getImplementedCsr(CsrNumber::FFLAGS))
+            csRegs_.configCsr("fflags", true, 0, 0x1f, 0x1f, isDebug);
+        }
 
       if (value & (URV(1) << ('d' - 'a')))  // Double precision FP.
-	{
-	  if (rvf_)
-	    rvd_ = true;
-	  else
-	    std::cerr << "Bit 3 (d) is set in the MISA register but f "
-		      << "extension (bit 5) is not enabled -- ignored\n";
-	}
+        {
+          if (rvf_)
+            rvd_ = true;
+          else
+            std::cerr << "Bit 3 (d) is set in the MISA register but f "
+                      << "extension (bit 5) is not enabled -- ignored\n";
+        }
 
       if (not (value & (URV(1) << ('i' - 'a'))))
-	std::cerr << "Bit 8 (i extension) is cleared in the MISA register "
-		  << " but extension is mandatory -- assuming bit 8 set\n";
+        std::cerr << "Bit 8 (i extension) is cleared in the MISA register "
+                  << " but extension is mandatory -- assuming bit 8 set\n";
 
       if (value & (URV(1) << ('m' - 'a')))  // Multiply/divide option.
-	rvm_ = true;
+        rvm_ = true;
 
       if (value & (URV(1) << ('u' - 'a')))  // User-mode option.
-	rvu_ = true;
+        rvu_ = true;
 
       if (value & (URV(1) << ('s' - 'a')))  // Supervisor-mode option.
-	rvs_ = true;
+        rvs_ = true;
 
       for (auto ec : { 'b', 'e', 'g', 'h', 'j', 'k', 'l', 'n', 'o', 'p',
-	    'q', 'r', 't', 'v', 'w', 'x', 'y', 'z' } )
-	{
-	  unsigned bit = ec - 'a';
-	  if (value & (URV(1) << bit))
-	    std::cerr << "Bit " << bit << " (" << ec << ") set in the MISA "
-		      << "register but extension is not supported "
-		      << "-- ignored\n";
-	}
+            'q', 'r', 't', 'v', 'w', 'x', 'y', 'z' } )
+        {
+          unsigned bit = ec - 'a';
+          if (value & (URV(1) << bit))
+            std::cerr << "Bit " << bit << " (" << ec << ") set in the MISA "
+                      << "register but extension is not supported "
+                      << "-- ignored\n";
+        }
     }
   
   prevCountersCsrOn_ = true;
@@ -265,7 +265,7 @@ Core<URV>::loadHexFile(const std::string& file)
 template <typename URV>
 bool
 Core<URV>::loadElfFile(const std::string& file, size_t& entryPoint,
-		       size_t& exitPoint)
+                       size_t& exitPoint)
 {
   return memory_.loadElfFile(file, entryPoint, exitPoint);
 }
@@ -334,7 +334,7 @@ Core<URV>::pokeMemory(size_t addr, uint8_t val)
   if (hasLr_)
     {
       if (addr >= lrAddr_ and (addr - lrAddr_) < lrSize_)
-	hasLr_ = false;
+        hasLr_ = false;
     }
 
   if (memory_.pokeByte(addr, val))
@@ -355,12 +355,12 @@ Core<URV>::pokeMemory(size_t addr, uint16_t val)
     {
       // If poke starts at any of the reserved bytes: lose reservation.
       if (addr >= lrAddr_ and (addr - lrAddr_) < lrSize_)
-	hasLr_ = false;
+        hasLr_ = false;
 
       // If poke starts before reserved bytes but spills into them:
       // lose reservation.
       if (addr < lrAddr_ and (lrAddr_ - addr) < 2)
-	hasLr_ = false;
+        hasLr_ = false;
     }
 
   if (memory_.poke(addr, val))
@@ -385,12 +385,12 @@ Core<URV>::pokeMemory(size_t addr, uint32_t val)
     {
       // If poke starts at any of the reserved bytes: lose reservation.
       if (addr >= lrAddr_ and (addr - lrAddr_) < lrSize_)
-	hasLr_ = false;
+        hasLr_ = false;
 
       // If poke starts before reserved bytes but spills into them:
       // lose reservation.
       if (addr < lrAddr_ and (lrAddr_ - addr) < 4)
-	hasLr_ = false;
+        hasLr_ = false;
     }
 
   if (memory_.poke(addr, val))
@@ -411,12 +411,12 @@ Core<URV>::pokeMemory(size_t addr, uint64_t val)
     {
       // If poke starts at any of the reserved bytes: lose reservation.
       if (addr >= lrAddr_ and (addr - lrAddr_) < lrSize_)
-	hasLr_ = false;
+        hasLr_ = false;
 
       // If poke starts before reserved bytes but spills into them:
       // lose reservation.
       if (addr < lrAddr_ and (lrAddr_ - addr) < 8)
-	hasLr_ = false;
+        hasLr_ = false;
     }
 
   if (memory_.poke(addr, val))
@@ -488,7 +488,7 @@ Core<URV>::clearToHostAddress()
 template <typename URV>
 void
 Core<URV>::putInStoreQueue(unsigned size, size_t addr, uint64_t data,
-			   uint64_t prevData)
+                           uint64_t prevData)
 {
   if (maxStoreQueueSize_ == 0 or memory_.isLastWriteToDccm())
     return;
@@ -496,9 +496,9 @@ Core<URV>::putInStoreQueue(unsigned size, size_t addr, uint64_t data,
   if (storeQueue_.size() >= maxStoreQueueSize_)
     {
       for (size_t i = 1; i < maxStoreQueueSize_; ++i)
-	storeQueue_[i-1] = storeQueue_[i];
+        storeQueue_[i-1] = storeQueue_[i];
       storeQueue_[maxStoreQueueSize_-1] = StoreInfo(size, addr, data,
-						    prevData);
+                                                    prevData);
     }
   else
     storeQueue_.push_back(StoreInfo(size, addr, data, prevData));
@@ -508,7 +508,7 @@ Core<URV>::putInStoreQueue(unsigned size, size_t addr, uint64_t data,
 template <typename URV>
 void
 Core<URV>::putInLoadQueue(unsigned size, size_t addr, unsigned regIx,
-			  uint64_t data)
+                          uint64_t data)
 {
   if (not loadQueueEnabled_)
     return;
@@ -524,7 +524,7 @@ Core<URV>::putInLoadQueue(unsigned size, size_t addr, unsigned regIx,
   if (loadQueue_.size() >= maxLoadQueueSize_)
     {
       for (size_t i = 1; i < maxLoadQueueSize_; ++i)
-	loadQueue_[i-1] = loadQueue_[i];
+        loadQueue_[i-1] = loadQueue_[i];
       loadQueue_[maxLoadQueueSize_-1] = LoadInfo(size, addr, regIx, data);
     }
   else
@@ -559,17 +559,17 @@ Core<URV>::removeFromLoadQueue(unsigned regIx)
     {
       auto& entry = loadQueue_.at(i-1);
       if (not entry.isValid())
-	continue;
+        continue;
       if (entry.regIx_ == regIx)
-	{
-	  if (last)
-	    {
-	      removeIx = i-1;
-	      last = false;
-	    }
-	  else
-	    entry.makeInvalid();
-	}
+        {
+          if (last)
+            {
+              removeIx = i-1;
+              last = false;
+            }
+          else
+            entry.makeInvalid();
+        }
     }
 
   if (removeIx < loadQueue_.size())
@@ -682,10 +682,10 @@ Core<URV>::applyStoreException(URV addr, unsigned& matches)
     {
       std::cerr << "Error: Store exception at 0x" << std::hex << addr << std::dec;
       if (matches == 0)
-	std::cerr << " does not match any address in the store queue\n";
+        std::cerr << " does not match any address in the store queue\n";
       else
-	std::cerr << " matches " << matches << " entries"
-		  << " in the store queue\n";
+        std::cerr << " matches " << matches << " entries"
+                  << " in the store queue\n";
       return false;
     }
 
@@ -701,43 +701,43 @@ Core<URV>::applyStoreException(URV addr, unsigned& matches)
 
       size_t entryEnd = entry.addr_ + entry.size_;
       if (hit)
-	{
-	  // Re-play portions of subsequent (to one with exception)
-	  // transactions covering undone bytes.
-	  uint64_t data = entry.newData_;
-	  for (size_t ba = entry.addr_; ba < entryEnd; ++ba, data >>= 8)
-	    if (ba >= undoBegin and ba < undoEnd)
-	      pokeMemory(ba, uint8_t(data));
-	}
+        {
+          // Re-play portions of subsequent (to one with exception)
+          // transactions covering undone bytes.
+          uint64_t data = entry.newData_;
+          for (size_t ba = entry.addr_; ba < entryEnd; ++ba, data >>= 8)
+            if (ba >= undoBegin and ba < undoEnd)
+              pokeMemory(ba, uint8_t(data));
+        }
       else if (addr >= entry.addr_ and addr < entryEnd)
-	{
-	  uint64_t prevData = entry.prevData_, newData = entry.newData_;
-	  hit = true;
-	  removeIx = ix;
-	  size_t offset = addr - entry.addr_;
-	  prevData >>= offset*8; newData >>= offset*8;
-	  for (size_t i = offset; i < entry.size_; ++i)
-	    {
-	      pokeMemory(addr++, uint8_t(prevData));
-	      prevData >>= 8; newData >>= 8;
-	      undoEnd = addr;
-	      if ((addr & 7) != 0)
-		continue;  // Keep undoing store till double word boundary
-	      // Reached double word boundary: trim & keep rest of store record
-	      if (i + 1 < entry.size_)
-		{
-		  entry = StoreInfo(entry.size_-i-1, addr, newData, prevData);
-		  removeIx = storeQueue_.size(); // Squash entry removal.
-		  break;
-		}
-	    }
-	}
+        {
+          uint64_t prevData = entry.prevData_, newData = entry.newData_;
+          hit = true;
+          removeIx = ix;
+          size_t offset = addr - entry.addr_;
+          prevData >>= offset*8; newData >>= offset*8;
+          for (size_t i = offset; i < entry.size_; ++i)
+            {
+              pokeMemory(addr++, uint8_t(prevData));
+              prevData >>= 8; newData >>= 8;
+              undoEnd = addr;
+              if ((addr & 7) != 0)
+                continue;  // Keep undoing store till double word boundary
+              // Reached double word boundary: trim & keep rest of store record
+              if (i + 1 < entry.size_)
+                {
+                  entry = StoreInfo(entry.size_-i-1, addr, newData, prevData);
+                  removeIx = storeQueue_.size(); // Squash entry removal.
+                  break;
+                }
+            }
+        }
     }
 
   if (removeIx < storeQueue_.size())
     {
       for (size_t i = removeIx + 1; i < storeQueue_.size(); ++i)
-	storeQueue_.at(i-1) = storeQueue_.at(i);
+        storeQueue_.at(i-1) = storeQueue_.at(i);
       storeQueue_.resize(storeQueue_.size() - 1);
     }
 
@@ -774,18 +774,18 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
   for (const LoadInfo& li : loadQueue_)
     {
       if (matches and li.isValid() and targetReg == li.regIx_)
-	hasYounger = true;
+        hasYounger = true;
 
       if (addr >= li.addr_ and addr < li.addr_ + li.size_)
-	{
-	  if (li.isValid())
-	    {
-	      targetReg = li.regIx_;
-	      matches++;
-	    }
-	  else
-	    iMatches++;
-	}
+        {
+          if (li.isValid())
+            {
+              targetReg = li.regIx_;
+              matches++;
+            }
+          else
+            iMatches++;
+        }
     }
 
   matches += iMatches;
@@ -793,10 +793,10 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
     {
       std::cerr << "Error: Load exception at 0x" << std::hex << addr << std::dec;
       if (matches == 0)
-	std::cerr << " does not match any entry in the load queue\n";
+        std::cerr << " does not match any entry in the load queue\n";
       else
-	std::cerr << " matches " << matches << " entries"
-		  << " in the load queue\n";
+        std::cerr << " matches " << matches << " entries"
+                  << " in the load queue\n";
       return false;
     }
 
@@ -811,13 +811,13 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
       auto& entry = loadQueue_.at(ix);
       size_t entryEnd = entry.addr_ + entry.size_;
       if (addr >= entry.addr_ and addr < entryEnd)
-	{
-	  removeIx = ix;
-	  if (not entry.isValid())
-	    continue;
-	}
+        {
+          removeIx = ix;
+          if (not entry.isValid())
+            continue;
+        }
       else
-	continue;
+        continue;
 
       removeIx = ix;
 
@@ -826,28 +826,28 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
       // Revert to oldest entry with same target reg. Invalidate older
       // entries with same target reg.
       for (size_t ix2 = removeIx; ix2 > 0; --ix2)
-	{
-	  auto& entry2 = loadQueue_.at(ix2-1);
-	  if (entry2.isValid() and entry2.regIx_ == entry.regIx_)
-	    {
-	      prev = entry2.prevData_;
-	      entry2.makeInvalid();
-	    }
-	}
+        {
+          auto& entry2 = loadQueue_.at(ix2-1);
+          if (entry2.isValid() and entry2.regIx_ == entry.regIx_)
+            {
+              prev = entry2.prevData_;
+              entry2.makeInvalid();
+            }
+        }
 
       if (not hasYounger)
-	pokeIntReg(entry.regIx_, prev);
+        pokeIntReg(entry.regIx_, prev);
 
       // Update prev-data of 1st younger item with same target reg.
       for (size_t ix2 = removeIx + 1; ix2 < loadQueue_.size(); ++ix2)
-	{
-	  auto& entry2 = loadQueue_.at(ix2);
- 	  if (entry2.isValid() and entry2.regIx_ == entry.regIx_)
- 	    {
-	      entry2.prevData_ = prev;
-	      break;
-	    }
-	}
+        {
+          auto& entry2 = loadQueue_.at(ix2);
+           if (entry2.isValid() and entry2.regIx_ == entry.regIx_)
+             {
+              entry2.prevData_ = prev;
+              break;
+            }
+        }
 
       break;
     }
@@ -855,7 +855,7 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
   if (removeIx < loadQueue_.size())
     {
       for (size_t i = removeIx + 1; i < loadQueue_.size(); ++i)
-	loadQueue_.at(i-1) = loadQueue_.at(i);
+        loadQueue_.at(i-1) = loadQueue_.at(i);
       loadQueue_.resize(loadQueue_.size() - 1);
     }
 
@@ -881,11 +881,11 @@ Core<URV>::applyLoadFinished(URV addr, bool matchOldest, unsigned& matches)
     {
       const LoadInfo& li = loadQueue_.at(i);
       if (li.addr_ == addr)
-	{
-	  if (not matchOldest or not matches)
-	    matchIx = i;
-	  matches++;
-	}
+        {
+          if (not matchOldest or not matches)
+            matchIx = i;
+          matches++;
+        }
     }
 
   if (matches == 0)
@@ -907,28 +907,28 @@ Core<URV>::applyLoadFinished(URV addr, bool matchOldest, unsigned& matches)
     {
       LoadInfo& li = loadQueue_.at(j);
       if (not li.isValid())
-	continue;
+        continue;
       if (li.regIx_ != targetReg)
-	continue;
+        continue;
 
       li.makeInvalid();
       if (j < prevIx)
-	{
-	  prevIx = j;
-	  prev = li.prevData_;
-	}
+        {
+          prevIx = j;
+          prev = li.prevData_;
+        }
     }
 
   // Update prev-data of 1st subsequent entry with same target.
   if (entry.isValid())
     for (size_t j = matchIx + 1; j < size; ++j)
       {
-	LoadInfo& li = loadQueue_.at(j);
-	if (li.isValid() and li.regIx_ == targetReg)
-	  {
-	    loadQueue_.at(j).prevData_ = prev;
-	    break;
-	  }
+        LoadInfo& li = loadQueue_.at(j);
+        if (li.isValid() and li.regIx_ == targetReg)
+          {
+            loadQueue_.at(j).prevData_ = prev;
+            break;
+          }
       }
 
   // Remove matching entry from queue.
@@ -938,10 +938,10 @@ Core<URV>::applyLoadFinished(URV addr, bool matchOldest, unsigned& matches)
       auto& li = loadQueue_.at(i);
       bool remove = i == matchIx;
       if (remove)
-	continue;
+        continue;
 
       if (newSize != i)
-	loadQueue_.at(newSize) = li;
+        loadQueue_.at(newSize) = li;
       newSize++;
     }
   loadQueue_.resize(newSize);
@@ -953,7 +953,7 @@ Core<URV>::applyLoadFinished(URV addr, bool matchOldest, unsigned& matches)
 static
 void
 printUnsignedHisto(const char* tag, const std::vector<uint64_t>& histo,
-		   FILE* file)
+                   FILE* file)
 {
   if (histo.size() < 7)
     return;
@@ -978,7 +978,7 @@ printUnsignedHisto(const char* tag, const std::vector<uint64_t>& histo,
 static
 void
 printSignedHisto(const char* tag, const std::vector<uint64_t>& histo,
-		 FILE* file)
+                 FILE* file)
 {
   if (histo.size() < 13)
     return;
@@ -1005,9 +1005,9 @@ printSignedHisto(const char* tag, const std::vector<uint64_t>& histo,
     fprintf(file, "    %s (2,     16] %" PRId64 "\n", tag, histo.at(9));
   if (histo.at(10))
     fprintf(file, "    %s (16,    1k] %" PRId64 "\n", tag, histo.at(10));
-  if (histo.at(11))	              
+  if (histo.at(11))                      
     fprintf(file, "    %s (1k,   64k] %" PRId64 "\n", tag, histo.at(11));
-  if (histo.at(12))	              
+  if (histo.at(12))                      
     fprintf(file, "    %s > 64k       %" PRId64 "\n", tag, histo.at(12));
 }
 
@@ -1043,7 +1043,7 @@ Core<URV>::reportInstructionFrequency(FILE* file) const
       const InstProfile& prof = instProfileVec_.at(ix);
       uint64_t freq = prof.freq_;
       if (not freq)
-	continue;
+        continue;
 
       fprintf(file, "%s %" PRId64 "\n", entry.name().c_str(), freq);
 
@@ -1052,53 +1052,53 @@ Core<URV>::reportInstructionFrequency(FILE* file) const
       uint64_t count = 0;
       for (auto n : prof.rd_) count += n;
       if (count)
-	{
-	  fprintf(file, "  +rd");
-	  for (unsigned i = 0; i < regCount; ++i)
-	    if (prof.rd_.at(i))
-	      fprintf(file, " %d:%" PRId64, i, prof.rd_.at(i));
-	  fprintf(file, "\n");
-	}
+        {
+          fprintf(file, "  +rd");
+          for (unsigned i = 0; i < regCount; ++i)
+            if (prof.rd_.at(i))
+              fprintf(file, " %d:%" PRId64, i, prof.rd_.at(i));
+          fprintf(file, "\n");
+        }
 
       uint64_t count1 = 0;
       for (auto n : prof.rs1_) count1 += n;
       if (count1)
-	{
-	  fprintf(file, "  +rs1");
-	  for (unsigned i = 0; i < regCount; ++i)
-	    if (prof.rs1_.at(i))
-	      fprintf(file, " %d:%" PRId64, i, prof.rs1_.at(i));
-	  fprintf(file, "\n");
+        {
+          fprintf(file, "  +rs1");
+          for (unsigned i = 0; i < regCount; ++i)
+            if (prof.rs1_.at(i))
+              fprintf(file, " %d:%" PRId64, i, prof.rs1_.at(i));
+          fprintf(file, "\n");
 
-	  const auto& histo = prof.rs1Histo_;
-	  if (entry.isUnsigned())
-	    printUnsignedHisto("+hist1", histo, file);
-	  else
-	    printSignedHisto("+hist1", histo, file);
-	}
+          const auto& histo = prof.rs1Histo_;
+          if (entry.isUnsigned())
+            printUnsignedHisto("+hist1", histo, file);
+          else
+            printSignedHisto("+hist1", histo, file);
+        }
 
       uint64_t count2 = 0;
       for (auto n : prof.rs2_) count2 += n;
       if (count2)
-	{
-	  fprintf(file, "  +rs2");
-	  for (unsigned i = 0; i < regCount; ++i)
-	    if (prof.rs2_.at(i))
-	      fprintf(file, " %d:%" PRId64, i, prof.rs2_.at(i));
-	  fprintf(file, "\n");
+        {
+          fprintf(file, "  +rs2");
+          for (unsigned i = 0; i < regCount; ++i)
+            if (prof.rs2_.at(i))
+              fprintf(file, " %d:%" PRId64, i, prof.rs2_.at(i));
+          fprintf(file, "\n");
 
-	  const auto& histo = prof.rs2Histo_;
-	  if (entry.isUnsigned())
-	    printUnsignedHisto("+hist2", histo, file);
-	  else
-	    printSignedHisto("+hist2", histo, file);
-	}
+          const auto& histo = prof.rs2Histo_;
+          if (entry.isUnsigned())
+            printUnsignedHisto("+hist2", histo, file);
+          else
+            printSignedHisto("+hist2", histo, file);
+        }
 
       if (prof.hasImm_)
-	{
-	  fprintf(file, "  +imm  min:%d max:%d\n", prof.minImm_, prof.maxImm_);
-	  printSignedHisto("+hist ", prof.immHisto_, file);
-	}
+        {
+          fprintf(file, "  +imm  min:%d max:%d\n", prof.minImm_, prof.maxImm_);
+          printSignedHisto("+hist ", prof.immHisto_, file);
+        }
     }
 }
 
@@ -1237,9 +1237,9 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
 
       bool isLoad = true;
       if (ldStAddrTriggerHit(addr, Timing::Before, isLoad, isInterruptEnabled()))
-	triggerTripped_ = true;
+        triggerTripped_ = true;
       if (triggerTripped_)
-	return false;
+        return false;
     }
 
   // Unsigned version of LOAD_TYPE
@@ -1250,12 +1250,12 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
       // Loading a byte from special address results in a byte read
       // from standard input.
       if (conIoValid_ and addr == conIo_)
-	{
-	  int c = fgetc(stdin);
-	  SRV val = c;
-	  intRegs_.write(rd, val);
-	  return true;
-	}
+        {
+          int c = fgetc(stdin);
+          SRV val = c;
+          intRegs_.write(rd, val);
+          return true;
+        }
     }
 
   // Misaligned load from io section triggers an exception. Crossing
@@ -1292,7 +1292,7 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
 
       // Put entry in load queue with value of rd before this load.
       if (loadQueueEnabled_)
-	putInLoadQueue(ldSize, addr, rd, peekIntReg(rd));
+        putInLoadQueue(ldSize, addr, rd, peekIntReg(rd));
 
       intRegs_.write(rd, value);
       return true;  // Success.
@@ -1354,7 +1354,7 @@ Core<URV>::readInst(size_t address, uint32_t& inst)
     {
       uint16_t high;
       if (not memory_.readInstHalfWord(address + 2, high))
-	return false;
+        return false;
       inst |= (uint32_t(high) << 16);
     }
 
@@ -1393,7 +1393,7 @@ Core<URV>::defineDccm(size_t region, size_t offset, size_t size)
 template <typename URV>
 bool
 Core<URV>::defineMemoryMappedRegisterRegion(size_t region, size_t offset,
-					  size_t size)
+                                          size_t size)
 {
   bool ok = memory_.defineMemoryMappedRegisterRegion(region, offset, size);
   if (ok)
@@ -1408,14 +1408,14 @@ Core<URV>::defineMemoryMappedRegisterRegion(size_t region, size_t offset,
 template <typename URV>
 bool
 Core<URV>::defineMemoryMappedRegisterWriteMask(size_t region,
-					       size_t regionOffset,
-					       size_t registerBlockOffset,
-					       size_t registerIx,
-					       uint32_t mask)
+                                               size_t regionOffset,
+                                               size_t registerBlockOffset,
+                                               size_t registerIx,
+                                               uint32_t mask)
 {
   return memory_.defineMemoryMappedRegisterWriteMask(region, regionOffset,
-						     registerBlockOffset,
-						     registerIx, mask);
+                                                     registerBlockOffset,
+                                                     registerIx, mask);
 }
 
 
@@ -1439,33 +1439,33 @@ Core<URV>::configMemoryFetch(const std::vector< std::pair<URV,URV> >& windows)
     {
       size_t region = memory_.getRegionIndex(addr);
       if (not regionHasLocalInstMem_.at(region))
-	memory_.setExecAccess(addr, false);
+        memory_.setExecAccess(addr, false);
     }
 
   for (auto& window : windows)
     {
       if (window.first > window.second)
-	{
-	  cerr << "Invalid memory range in instruction access configuration: 0x"
-	       << std::hex << window.first << " to 0x" << window.second
-	       << '\n' << std::dec;
-	  errors++;
-	}
+        {
+          cerr << "Invalid memory range in instruction access configuration: 0x"
+               << std::hex << window.first << " to 0x" << window.second
+               << '\n' << std::dec;
+          errors++;
+        }
 
       size_t addr = window.first, end = window.second;
       if (end > memory_.size())
-	end = memory_.size();
+        end = memory_.size();
 
       for ( ; addr <= end; addr += pageSize )
-	{
-	  size_t region = memory_.getRegionIndex(addr);
-	  if (not regionHasLocalInstMem_.at(region))
-	    memory_.setExecAccess(addr, true);
-	}
+        {
+          size_t region = memory_.getRegionIndex(addr);
+          if (not regionHasLocalInstMem_.at(region))
+            memory_.setExecAccess(addr, true);
+        }
 
       size_t region = memory_.getRegionIndex(end);
       if (not regionHasLocalInstMem_.at(region))
-	memory_.setExecAccess(end, true);
+        memory_.setExecAccess(end, true);
     }
 
   return errors == 0;
@@ -1492,42 +1492,42 @@ Core<URV>::configMemoryDataAccess(const std::vector< std::pair<URV,URV> >& windo
     {
       size_t region = memory_.getRegionIndex(addr);
       if (not regionHasLocalDataMem_.at(region))
-	{
-	  memory_.setWriteAccess(addr, false);
-	  memory_.setReadAccess(addr, false);
-	}
+        {
+          memory_.setWriteAccess(addr, false);
+          memory_.setReadAccess(addr, false);
+        }
     }
 
   for (auto& window : windows)
     {
       if (window.first > window.second)
-	{
-	  cerr << "Invalid memory range in data access configuration: 0x"
-	       << std::hex << window.first << " to 0x" << window.second
-	       << '\n' << std::dec;
-	  errors++;
-	}
+        {
+          cerr << "Invalid memory range in data access configuration: 0x"
+               << std::hex << window.first << " to 0x" << window.second
+               << '\n' << std::dec;
+          errors++;
+        }
 
       size_t addr = window.first, end = window.second;
       if (end > memory_.size())
-	end = memory_.size();
+        end = memory_.size();
 
       for ( ; addr <= end; addr += pageSize )
-	{
-	  size_t region = memory_.getRegionIndex(addr);
-	  if (not regionHasLocalDataMem_.at(region))
-	    {
-	      memory_.setWriteAccess(addr, true);
-	      memory_.setReadAccess(addr, true);
-	    }
-	}
+        {
+          size_t region = memory_.getRegionIndex(addr);
+          if (not regionHasLocalDataMem_.at(region))
+            {
+              memory_.setWriteAccess(addr, true);
+              memory_.setReadAccess(addr, true);
+            }
+        }
 
       size_t region = memory_.getRegionIndex(end);
       if (not regionHasLocalDataMem_.at(region))
-	{
-	  memory_.setWriteAccess(end, true);
-	  memory_.setReadAccess(end, true);
-	}
+        {
+          memory_.setWriteAccess(end, true);
+          memory_.setReadAccess(end, true);
+        }
     }
 
   return errors == 0;
@@ -1586,14 +1586,14 @@ Core<URV>::fetchInstPostTrigger(URV addr, uint32_t& inst, FILE* traceFile)
   if (not forceFetchFail_ and (addr & 1) == 0)
     {
       if (memory_.readInstWord(addr, inst))
-	return true;  // Read 4 bytes: success.
+        return true;  // Read 4 bytes: success.
 
       uint16_t half;
       if (memory_.readInstHalfWord(addr, half))
-	{
-	  if (isCompressedInst(inst))
-	    return true; // Read 2 bytes and compressed inst: success.
-	}
+        {
+          if (isCompressedInst(inst))
+            return true; // Read 2 bytes and compressed inst: success.
+        }
     }
 
   // Fetch failed: take pending trigger-exception.
@@ -1603,6 +1603,10 @@ Core<URV>::fetchInstPostTrigger(URV addr, uint32_t& inst, FILE* traceFile)
   return false;
 }
 
+static std::mutex printInstTraceMutex;
+// This is set to false when user hits control-c to interrupt a long
+// run.
+volatile static bool userOk = true;
 
 template <typename URV>
 void
@@ -1619,9 +1623,19 @@ Core<URV>::illegalInst()
 
   if (consecutiveIllegalCount_ > 64)  // FIX: Make a parameter
     {
+#ifndef DISABLE_EXCEPTIONS
       throw CoreException(CoreException::Stop,
-			  "64 consecutive illegal instructions",
-			  0, 0);
+                          "64 consecutive illegal instructions",
+                          0, 0);
+#else
+    std::lock_guard<std::mutex> guard(printInstTraceMutex);
+    ++retiredInsts_;
+    std::cerr << ("Error: Failed ")
+        << "stop: " << "64 consecutive illegal instructions" << ": " << 0 << '\n';
+    setTargetProgramFinished(true);
+    userOk = false;
+    return;
+#endif
     }
 
   counterAtLastIllegal_ = retiredInsts_;
@@ -1654,7 +1668,7 @@ Core<URV>::initiateFastInterrupt(InterruptCause cause, URV pcToSave)
   // register.
   URV addr = 0;
   if (not csRegs_.read(CsrNumber::MEIHAP, PrivilegeMode::Machine,
-		       debugMode_, addr))
+                       debugMode_, addr))
     {
       initiateNmi(URV(NmiCause::UNKNOWN), pcToSave);
       return;
@@ -1997,7 +2011,7 @@ Core<URV>::peekCsr(CsrNumber csrn, URV& val) const
 template <typename URV>
 bool
 Core<URV>::peekCsr(CsrNumber csrn, URV& val, URV& reset, URV& writeMask,
-		   URV& pokeMask) const
+                   URV& pokeMask) const
 { 
   const Csr<URV>* csr = csRegs_.getImplementedCsr(csrn);
   if (not csr)
@@ -2040,8 +2054,8 @@ Core<URV>::pokeCsr(CsrNumber csr, URV val)
       URV claimIdMask = 0x3fc;
       URV prev = 0;
       if (not csRegs_.read(CsrNumber::MEIHAP, PrivilegeMode::Machine,
-			   debugMode_, prev))
-	return false;
+                           debugMode_, prev))
+        return false;
       URV newVal = (prev & ~claimIdMask) | (val & claimIdMask);
       csRegs_.poke(CsrNumber::MEIHAP, newVal);
       return true;
@@ -2061,10 +2075,10 @@ Core<URV>::pokeCsr(CsrNumber csr, URV val)
     {
       URV value = 0;
       if (csRegs_.peek(CsrNumber::MGPMC, value))
-	{
-	  countersCsrOn_ = (value & 1) == 1;
-	  prevCountersCsrOn_ = countersCsrOn_;
-	}
+        {
+          countersCsrOn_ = (value & 1) == 1;
+          prevCountersCsrOn_ = countersCsrOn_;
+        }
     }
   else if (csr >= CsrNumber::MSPCBA and csr <= CsrNumber::MSPCC)
     updateStackChecker();
@@ -2124,7 +2138,7 @@ Core<URV>::findFpReg(const std::string& name, unsigned& num) const
       std::string numStr = name.substr(1);
       unsigned n = 0;
       if (parseNumber<unsigned>(numStr, num) and n < fpRegCount())
-	return true;
+        return true;
     }
 
   unsigned n = 0;
@@ -2149,7 +2163,7 @@ Core<URV>::findCsr(const std::string& name) const
     {
       unsigned n = 0;
       if (parseNumber<unsigned>(name, n))
-	csr = csRegs_.findCsr(CsrNumber(n));
+        csr = csRegs_.findCsr(CsrNumber(n));
     }
 
   return csr;
@@ -2159,22 +2173,22 @@ Core<URV>::findCsr(const std::string& name) const
 template <typename URV>
 bool
 Core<URV>::configCsr(const std::string& name, bool implemented,
-		     URV resetValue, URV mask, URV pokeMask, bool debug)
+                     URV resetValue, URV mask, URV pokeMask, bool debug)
 {
   return csRegs_.configCsr(name, implemented, resetValue, mask, pokeMask,
-			   debug);
+                           debug);
 }
 
 
 template <typename URV>
 bool
 Core<URV>::defineCsr(const std::string& name, CsrNumber num,
-		     bool implemented, URV resetVal, URV mask,
-		     URV pokeMask, bool isDebug)
+                     bool implemented, URV resetVal, URV mask,
+                     URV pokeMask, bool isDebug)
 {
   bool mandatory = false, quiet = true;
   auto c = csRegs_.defineCsr(name, num, mandatory, implemented, resetVal,
-			     mask, pokeMask, isDebug, quiet);
+                             mask, pokeMask, isDebug, quiet);
   return c != nullptr;
 }
 
@@ -2190,14 +2204,14 @@ Core<URV>::configMachineModePerfCounters(unsigned numCounters)
 template <typename URV>
 void
 formatInstTrace(FILE* out, uint64_t tag, unsigned hartId, URV currPc,
-		const char* opcode, char resource, URV addr,
-		URV value, const char* assembly);
+                const char* opcode, char resource, URV addr,
+                URV value, const char* assembly);
 
 template <>
 void
 formatInstTrace<uint32_t>(FILE* out, uint64_t tag, unsigned hartId, uint32_t currPc,
-		const char* opcode, char resource, uint32_t addr,
-		uint32_t value, const char* assembly)
+                const char* opcode, char resource, uint32_t addr,
+                uint32_t value, const char* assembly)
 {
   if (resource == 'r')
     {
@@ -2223,8 +2237,8 @@ formatInstTrace<uint32_t>(FILE* out, uint64_t tag, unsigned hartId, uint32_t cur
 template <>
 void
 formatInstTrace<uint64_t>(FILE* out, uint64_t tag, unsigned hartId, uint64_t currPc,
-		const char* opcode, char resource, uint64_t addr,
-		uint64_t value, const char* assembly)
+                const char* opcode, char resource, uint64_t addr,
+                uint64_t value, const char* assembly)
 {
   fprintf(out, "#%" PRId64 " %d %016" PRIx64 " %8s %c %016" PRIx64 " %016" PRIx64 "  %s",
           tag, hartId, currPc, opcode, resource, addr, value, assembly);
@@ -2233,14 +2247,14 @@ formatInstTrace<uint64_t>(FILE* out, uint64_t tag, unsigned hartId, uint64_t cur
 template <typename URV>
 void
 formatFpInstTrace(FILE* out, uint64_t tag, unsigned hartId, URV currPc,
-		  const char* opcode, unsigned fpReg,
-		  uint64_t fpVal, const char* assembly);
+                  const char* opcode, unsigned fpReg,
+                  uint64_t fpVal, const char* assembly);
 
 template <>
 void
 formatFpInstTrace<uint32_t>(FILE* out, uint64_t tag, unsigned hartId, uint32_t currPc,
-		  const char* opcode, unsigned fpReg,
-		  uint64_t fpVal, const char* assembly)
+                  const char* opcode, unsigned fpReg,
+                  uint64_t fpVal, const char* assembly)
 {
   fprintf(out, "#%" PRId64 " %d %08x %8s f %02x %016" PRIx64 "  %s",
           tag, hartId, currPc, opcode, fpReg, fpVal, assembly);
@@ -2249,20 +2263,17 @@ formatFpInstTrace<uint32_t>(FILE* out, uint64_t tag, unsigned hartId, uint32_t c
 template <>
 void
 formatFpInstTrace<uint64_t>(FILE* out, uint64_t tag, unsigned hartId, uint64_t currPc,
-		  const char* opcode, unsigned fpReg,
-		  uint64_t fpVal, const char* assembly)
+                  const char* opcode, unsigned fpReg,
+                  uint64_t fpVal, const char* assembly)
 {
   fprintf(out, "#%" PRId64 " %d %016" PRIx64 " %8s f %016" PRIx64 " %016" PRIx64 "  %s",
           tag, hartId, currPc, opcode, uint64_t(fpReg), fpVal, assembly);
 }
 
-
-static std::mutex printInstTraceMutex;
-
 template <typename URV>
 void
 Core<URV>::printInstTrace(uint32_t inst, uint64_t tag, std::string& tmp,
-			  FILE* out, bool interrupt)
+                          FILE* out, bool interrupt)
 {
   DecodedInst di;
   decode(pc_, inst, di);
@@ -2274,7 +2285,7 @@ Core<URV>::printInstTrace(uint32_t inst, uint64_t tag, std::string& tmp,
 template <typename URV>
 void
 Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
-			  FILE* out, bool interrupt)
+                          FILE* out, bool interrupt)
 {
   // Serialize to avoid jumbled output.
   std::lock_guard<std::mutex> guard(printInstTraceMutex);
@@ -2305,7 +2316,7 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
     {
       value = intRegs_.read(reg);
       formatInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, 'r', reg,
-			   value, tmp.c_str());
+                           value, tmp.c_str());
       pending = true;
     }
 
@@ -2316,7 +2327,7 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
       uint64_t val = fpRegs_.readBits(fpReg);
       if (pending) fprintf(out, "  +\n");
       formatFpInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, fpReg,
-			     val, tmp.c_str());
+                             val, tmp.c_str());
       pending = true;
     }
 
@@ -2332,14 +2343,14 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
   for (CsrNumber csr : csrs)
     {
       if (not csRegs_.read(csr, PrivilegeMode::Machine, debugMode_, value))
-	continue;
+        continue;
 
       if (csr >= CsrNumber::TDATA1 and csr <= CsrNumber::TDATA3)
-	{
-	  size_t ix = size_t(csr) - size_t(CsrNumber::TDATA1);
-	  tdataChanged.at(ix) = true;
-	  continue; // Debug triggers printed separately below
-	}
+        {
+          size_t ix = size_t(csr) - size_t(CsrNumber::TDATA1);
+          tdataChanged.at(ix) = true;
+          continue; // Debug triggers printed separately below
+        }
       csrMap[URV(csr)] = value;
     }
 
@@ -2348,29 +2359,29 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
     {
       URV data1(0), data2(0), data3(0);
       if (not peekTrigger(trigger, data1, data2, data3))
-	continue;
+        continue;
       if (tdataChanged.at(0))
-	{
-	  URV ecsr = (trigger << 16) | URV(CsrNumber::TDATA1);
-	  csrMap[ecsr] = data1;
-	}
+        {
+          URV ecsr = (trigger << 16) | URV(CsrNumber::TDATA1);
+          csrMap[ecsr] = data1;
+        }
       if (tdataChanged.at(1))
-	{
-	  URV ecsr = (trigger << 16) | URV(CsrNumber::TDATA2);
-	  csrMap[ecsr] = data2;
-	}
+        {
+          URV ecsr = (trigger << 16) | URV(CsrNumber::TDATA2);
+          csrMap[ecsr] = data2;
+        }
       if (tdataChanged.at(2))
-	{
-	  URV ecsr = (trigger << 16) | URV(CsrNumber::TDATA3);
-	  csrMap[ecsr] = data3;
-	}
+        {
+          URV ecsr = (trigger << 16) | URV(CsrNumber::TDATA3);
+          csrMap[ecsr] = data3;
+        }
     }
 
   for (const auto& [key, val] : csrMap)
     {
       if (pending) fprintf(out, "  +\n");
       formatInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, 'c',
-			   key, val, tmp.c_str());
+                           key, val, tmp.c_str());
       pending = true;
     }
 
@@ -2381,10 +2392,10 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
   if (writeSize > 0)
     {
       if (pending)
-	fprintf(out, "  +\n");
+        fprintf(out, "  +\n");
 
       formatInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, 'm',
-			   URV(address), URV(memValue), tmp.c_str());
+                           URV(address), URV(memValue), tmp.c_str());
       pending = true;
     }
 
@@ -2394,7 +2405,7 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
     {
       // No diffs: Generate an x0 record.
       formatInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, 'r', 0, 0,
-			  tmp.c_str());
+                          tmp.c_str());
       fprintf(out, "\n");
     }
 }
@@ -2462,7 +2473,7 @@ addToUnsignedHistogram(std::vector<uint64_t>& histo, uint64_t val)
 template <typename URV>
 void
 Core<URV>::updatePerformanceCounters(uint32_t inst, const InstEntry& info,
-				     uint32_t op0, uint32_t op1)
+                                     uint32_t op0, uint32_t op1)
 {
   // We do not update the performance counters if an instruction
   // causes an exception unless it is an ebreak or an ecall.
@@ -2485,17 +2496,17 @@ Core<URV>::updatePerformanceCounters(uint32_t inst, const InstEntry& info,
   if (info.type() == InstType::Int)
     {
       if (id == InstId::ebreak or id == InstId::c_ebreak)
-	pregs.updateCounters(EventNumber::Ebreak);
+        pregs.updateCounters(EventNumber::Ebreak);
       else if (id == InstId::ecall)
-	pregs.updateCounters(EventNumber::Ecall);
+        pregs.updateCounters(EventNumber::Ecall);
       else if (id == InstId::fence)
-	pregs.updateCounters(EventNumber::Fence);
+        pregs.updateCounters(EventNumber::Fence);
       else if (id == InstId::fencei)
-	pregs.updateCounters(EventNumber::Fencei);
+        pregs.updateCounters(EventNumber::Fencei);
       else if (id == InstId::mret)
-	pregs.updateCounters(EventNumber::Mret);
+        pregs.updateCounters(EventNumber::Mret);
       else if (id != InstId::illegal)
-	pregs.updateCounters(EventNumber::Alu);
+        pregs.updateCounters(EventNumber::Alu);
     }
   else if (info.isMultiply())
     {
@@ -2509,71 +2520,71 @@ Core<URV>::updatePerformanceCounters(uint32_t inst, const InstEntry& info,
     {
       pregs.updateCounters(EventNumber::Load);
       if (misalignedLdSt_)
-	pregs.updateCounters(EventNumber::MisalignLoad);
+        pregs.updateCounters(EventNumber::MisalignLoad);
     }
   else if (info.isStore())
     {
       pregs.updateCounters(EventNumber::Store);
       if (misalignedLdSt_)
-	pregs.updateCounters(EventNumber::MisalignStore);
+        pregs.updateCounters(EventNumber::MisalignStore);
     }
   else if (info.isAtomic())
     {
       if (id == InstId::lr_w or id == InstId::lr_d)
-	pregs.updateCounters(EventNumber::Lr);
+        pregs.updateCounters(EventNumber::Lr);
       else if (id == InstId::sc_w or id == InstId::sc_d)
-	pregs.updateCounters(EventNumber::Sc);
+        pregs.updateCounters(EventNumber::Sc);
       else
-	pregs.updateCounters(EventNumber::Atomic);
+        pregs.updateCounters(EventNumber::Atomic);
     }
   else if (info.isCsr() and not hasException_)
     {
       if ((id == InstId::csrrw or id == InstId::csrrwi))
-	{
-	  if (op0 == 0)
-	    pregs.updateCounters(EventNumber::CsrWrite);
-	  else
-	    pregs.updateCounters(EventNumber::CsrReadWrite);
-	}
+        {
+          if (op0 == 0)
+            pregs.updateCounters(EventNumber::CsrWrite);
+          else
+            pregs.updateCounters(EventNumber::CsrReadWrite);
+        }
       else
-	{
-	  if (op1 == 0)
-	    pregs.updateCounters(EventNumber::CsrRead);
-	  else
-	    pregs.updateCounters(EventNumber::CsrReadWrite);
-	}
+        {
+          if (op1 == 0)
+            pregs.updateCounters(EventNumber::CsrRead);
+          else
+            pregs.updateCounters(EventNumber::CsrReadWrite);
+        }
 
       // Counter modified by csr instruction is not updated.
       std::vector<CsrNumber> csrs;
       std::vector<unsigned> triggers;
       csRegs_.getLastWrittenRegs(csrs, triggers);
       for (auto& csr : csrs)
-	if (pregs.isModified(unsigned(csr) - unsigned(CsrNumber::MHPMCOUNTER3)))
-	  {
-	    URV val;
-	    peekCsr(csr, val);
-	    pokeCsr(csr, val - 1);
-	  }
-	else if (csr >= CsrNumber::MHPMEVENT3 and csr <= CsrNumber::MHPMEVENT31)
-	  {
-	    unsigned id = unsigned(csr) - unsigned(CsrNumber::MHPMEVENT3);
-	    if (pregs.isModified(id))
-	      {
-		URV val;
-		CsrNumber csr2 = CsrNumber(id + unsigned(CsrNumber::MHPMCOUNTER3));
-		if (pregs.isModified(unsigned(csr2) - unsigned(CsrNumber::MHPMCOUNTER3)))
-		  {
-		    peekCsr(csr2, val);
-		    pokeCsr(csr2, val - 1);
-		  }
-	      }
-	  }
+        if (pregs.isModified(unsigned(csr) - unsigned(CsrNumber::MHPMCOUNTER3)))
+          {
+            URV val;
+            peekCsr(csr, val);
+            pokeCsr(csr, val - 1);
+          }
+        else if (csr >= CsrNumber::MHPMEVENT3 and csr <= CsrNumber::MHPMEVENT31)
+          {
+            unsigned id = unsigned(csr) - unsigned(CsrNumber::MHPMEVENT3);
+            if (pregs.isModified(id))
+              {
+                URV val;
+                CsrNumber csr2 = CsrNumber(id + unsigned(CsrNumber::MHPMCOUNTER3));
+                if (pregs.isModified(unsigned(csr2) - unsigned(CsrNumber::MHPMCOUNTER3)))
+                  {
+                    peekCsr(csr2, val);
+                    pokeCsr(csr2, val - 1);
+                  }
+              }
+          }
     }
   else if (info.isBranch())
     {
       pregs.updateCounters(EventNumber::Branch);
       if (lastBranchTaken_)
-	pregs.updateCounters(EventNumber::BranchTaken);
+        pregs.updateCounters(EventNumber::BranchTaken);
     }
 
   pregs.clearModified();
@@ -2616,13 +2627,13 @@ Core<URV>::accumulateInstructionStats(const DecodedInst& di)
     {
       hasRd = info.isIthOperandWrite(0);
       if (hasRd)
-	prof.rd_.at(di.op0())++;
+        prof.rd_.at(di.op0())++;
       else
-	{
-	  rs1 = di.op0();
-	  prof.rs1_.at(rs1)++;
-	  hasRs1 = true;
-	}
+        {
+          rs1 = di.op0();
+          prof.rs1_.at(rs1)++;
+          hasRs1 = true;
+        }
     }
 
   bool hasImm = false;  // True if instruction has an immediate operand.
@@ -2631,17 +2642,17 @@ Core<URV>::accumulateInstructionStats(const DecodedInst& di)
   if (info.ithOperandType(1) == OperandType::IntReg)
     {
       if (hasRd)
-	{
-	  rs1 = di.op1();
-	  prof.rs1_.at(rs1)++;
-	  hasRs1 = true;
-	}
+        {
+          rs1 = di.op1();
+          prof.rs1_.at(rs1)++;
+          hasRs1 = true;
+        }
       else
-	{
-	  rs2 = di.op1();
-	  prof.rs2_.at(rs2)++;
-	  hasRs2 = true;
-	}
+        {
+          rs2 = di.op1();
+          prof.rs2_.at(rs2)++;
+          hasRs2 = true;
+        }
     }
   else if (info.ithOperandType(1) == OperandType::Imm)
     {
@@ -2652,13 +2663,13 @@ Core<URV>::accumulateInstructionStats(const DecodedInst& di)
   if (info.ithOperandType(2) == OperandType::IntReg)
     {
       if (hasRd)
-	{
-	  rs2 = di.op2();
-	  prof.rs2_.at(rs2)++;
-	  hasRs2 = true;
-	}
+        {
+          rs2 = di.op2();
+          prof.rs2_.at(rs2)++;
+          hasRs2 = true;
+        }
       else
-	assert(0);
+        assert(0);
     }
   else if (info.ithOperandType(2) == OperandType::Imm)
     {
@@ -2671,14 +2682,14 @@ Core<URV>::accumulateInstructionStats(const DecodedInst& di)
       prof.hasImm_ = true;
 
       if (prof.freq_ == 1)
-	{
-	  prof.minImm_ = prof.maxImm_ = imm;
-	}
+        {
+          prof.minImm_ = prof.maxImm_ = imm;
+        }
       else
-	{
-	  prof.minImm_ = std::min(prof.minImm_, imm);
-	  prof.maxImm_ = std::max(prof.maxImm_, imm);
-	}
+        {
+          prof.minImm_ = std::min(prof.minImm_, imm);
+          prof.maxImm_ = std::max(prof.maxImm_, imm);
+        }
       addToSignedHistogram(prof.immHisto_, imm);
     }
 
@@ -2690,22 +2701,22 @@ Core<URV>::accumulateInstructionStats(const DecodedInst& di)
     {
       URV val1 = intRegs_.read(rs1);
       if (rs1 == rd)
-	val1 = rdOrigVal;
+        val1 = rdOrigVal;
       if (info.isUnsigned())
-	addToUnsignedHistogram(prof.rs1Histo_, val1);
+        addToUnsignedHistogram(prof.rs1Histo_, val1);
       else
-	addToSignedHistogram(prof.rs1Histo_, SRV(val1));
+        addToSignedHistogram(prof.rs1Histo_, SRV(val1));
     }
 
   if (hasRs2)
     {
       URV val2 = intRegs_.read(rs2);
       if (rs2 == rd)
-	val2 = rdOrigVal;
+        val2 = rdOrigVal;
       if (info.isUnsigned())
-	addToUnsignedHistogram(prof.rs2Histo_, val2);
+        addToUnsignedHistogram(prof.rs2Histo_, val2);
       else
-	addToSignedHistogram(prof.rs2Histo_, SRV(val2));
+        addToSignedHistogram(prof.rs2Histo_, SRV(val2));
     }
 }
 
@@ -2759,11 +2770,11 @@ Core<URV>::setTargetProgramArgs(const std::vector<std::string>& args)
       size_t ix = 0;
 
       for (uint8_t c : arg)
-	if (not memory_.pokeByte(sp + ix++, c))
-	  return false;
+        if (not memory_.pokeByte(sp + ix++, c))
+          return false;
 
       if (not memory_.pokeByte(sp + ix++, uint8_t(0))) // Null char.
-	return false;
+        return false;
     }
 
   addresses.push_back(0);  // Null pointer at end of argv.
@@ -2785,7 +2796,7 @@ Core<URV>::setTargetProgramArgs(const std::vector<std::string>& args)
   for (const auto addr : addresses)
     {
       if (not memory_.poke(sp + ix++*sizeof(URV), addr))
-	return false;
+        return false;
     }
 
   // Put argc on the stack.
@@ -2826,7 +2837,7 @@ Core<URV>::lastFpReg() const
 template <typename URV>
 void
 Core<URV>::lastCsr(std::vector<CsrNumber>& csrs,
-		   std::vector<unsigned>& triggers) const
+                   std::vector<unsigned>& triggers) const
 {
   csRegs_.getLastWrittenRegs(csrs, triggers);
 }
@@ -2835,7 +2846,7 @@ Core<URV>::lastCsr(std::vector<CsrNumber>& csrs,
 template <typename URV>
 void
 Core<URV>::lastMemory(std::vector<size_t>& addresses,
-		      std::vector<uint32_t>& words) const
+                      std::vector<uint32_t>& words) const
 {
   addresses.clear();
   words.clear();
@@ -2869,7 +2880,7 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core);
 template <typename URV>
 bool
 Core<URV>::takeTriggerAction(FILE* traceFile, URV pc, URV info,
-			     uint64_t& counter, bool beforeTiming)
+                             uint64_t& counter, bool beforeTiming)
 {
   // Check triggers configuration to determine action: take breakpoint
   // exception or enter debugger.
@@ -2885,10 +2896,10 @@ Core<URV>::takeTriggerAction(FILE* traceFile, URV pc, URV info,
     {
       initiateException(ExceptionCause::BREAKP, pc, info);
       if (dcsrStep_)
-	{
-	  enterDebugMode(DebugModeCause::TRIGGER, pc_);
-	  enteredDebug = true;
-	}
+        {
+          enterDebugMode(DebugModeCause::TRIGGER, pc_);
+          enteredDebug = true;
+        }
     }
 
   if (beforeTiming and traceFile)
@@ -2916,17 +2927,15 @@ reportInstsPerSec(uint64_t instCount, double elapsed, bool keyboardInterrupt)
   if (keyboardInterrupt)
     std::cerr << "Keyboard interrupt\n";
   std::cerr << "Retired " << instCount << " instruction"
-	    << (instCount > 1? "s" : "") << " in "
-	    << (boost::format("%.2fs") % elapsed);
+            << (instCount > 1? "s" : "") << " in "
+            << (boost::format("%.2fs") % elapsed);
   if (elapsed > 0)
     std::cerr << "  " << size_t(double(instCount)/elapsed) << " inst/s";
   std::cerr << '\n';
 }
 
 
-// This is set to false when user hits control-c to interrupt a long
-// run.
-volatile static bool userOk = true;
+
 
 static
 void keyboardInterruptHandler(int)
@@ -2957,136 +2966,140 @@ Core<URV>::untilAddress(URV address, FILE* traceFile)
   uint32_t inst = 0;
 
   while (pc_ != address and counter < limit and userOk)
+  {
+    inst = 0;
+
+#ifndef DISABLE_EXCEPTIONS
+    try
+#endif
     {
-      inst = 0;
+      currPc_ = pc_;
 
-      try
-	{
-	  currPc_ = pc_;
+      loadAddrValid_ = false;
+      triggerTripped_ = false;
+      hasException_ = false;
 
-	  loadAddrValid_ = false;
-	  triggerTripped_ = false;
-	  hasException_ = false;
+      ++counter;
 
-	  ++counter;
+      // Process pre-execute address trigger and fetch instruction.
+      bool hasTrig = hasActiveInstTrigger();
+      triggerTripped_ = hasTrig && instAddrTriggerHit(pc_,
+                                                      TriggerTiming::Before,
+                                                      isInterruptEnabled());
+      // Fetch instruction.
+      bool fetchOk = true;
+      if (triggerTripped_)
+        {
+          if (not fetchInstPostTrigger(pc_, inst, traceFile))
+            {
+              ++cycleCount_;
+              continue;  // Next instruction in trap handler.
+            }
+        }
+      else
+        fetchOk = fetchInst(pc_, inst);
+      if (not fetchOk)
+        {
+          ++cycleCount_;
+          if (traceFile)
+            printInstTrace(inst, counter, instStr, traceFile);
+          continue;  // Next instruction in trap handler.
+        }
 
-	  // Process pre-execute address trigger and fetch instruction.
-	  bool hasTrig = hasActiveInstTrigger();
-	  triggerTripped_ = hasTrig && instAddrTriggerHit(pc_,
-							  TriggerTiming::Before,
-							  isInterruptEnabled());
-	  // Fetch instruction.
-	  bool fetchOk = true;
-	  if (triggerTripped_)
-	    {
-	      if (not fetchInstPostTrigger(pc_, inst, traceFile))
-		{
-		  ++cycleCount_;
-		  continue;  // Next instruction in trap handler.
-		}
-	    }
-	  else
-	    fetchOk = fetchInst(pc_, inst);
-	  if (not fetchOk)
-	    {
-	      ++cycleCount_;
-	      if (traceFile)
-		printInstTrace(inst, counter, instStr, traceFile);
-	      continue;  // Next instruction in trap handler.
-	    }
+      // Process pre-execute opcode trigger.
+      if (hasTrig and instOpcodeTriggerHit(inst, TriggerTiming::Before,
+                                            isInterruptEnabled()))
+        triggerTripped_ = true;
 
-	  // Process pre-execute opcode trigger.
-	  if (hasTrig and instOpcodeTriggerHit(inst, TriggerTiming::Before,
-					       isInterruptEnabled()))
-	    triggerTripped_ = true;
+      // Decode unless match in decode cache.
+      uint32_t ix = (pc_ >> 1) & decodeCacheMask_;
+      DecodedInst* di = &decodeCache_[ix];
+      if (not di->isValid() or di->address() != pc_)
+        decode(pc_, inst, *di);
 
-	  // Decode unless match in decode cache.
-	  uint32_t ix = (pc_ >> 1) & decodeCacheMask_;
-	  DecodedInst* di = &decodeCache_[ix];
-	  if (not di->isValid() or di->address() != pc_)
-	    decode(pc_, inst, *di);
+      bool doingWide = wideLdSt_;
 
-	  bool doingWide = wideLdSt_;
+      // Execute.
+      pc_ += di->instSize();
+      execute(di);
 
-	  // Execute.
-	  pc_ += di->instSize();
-	  execute(di);
+      if (doingWide)
+        enableWideLdStMode(false);
 
-	  if (doingWide)
-	    enableWideLdStMode(false);
+      ++cycleCount_;
 
-	  ++cycleCount_;
+      if (hasException_)
+        {
+          if (traceFile)
+            {
+              printInstTrace(*di, counter, instStr, traceFile);
+              clearTraceData();
+            }
+          continue;
+        }
 
-	  if (hasException_)
-	    {
-	      if (traceFile)
-		{
-		  printInstTrace(*di, counter, instStr, traceFile);
-		  clearTraceData();
-		}
-	      continue;
-	    }
+      if (triggerTripped_)
+        {
+          undoForTrigger();
+          if (takeTriggerAction(traceFile, currPc_, currPc_,
+                                counter, true))
+            return true;
+          continue;
+        }
 
-	  if (triggerTripped_)
-	    {
-	      undoForTrigger();
-	      if (takeTriggerAction(traceFile, currPc_, currPc_,
-				    counter, true))
-		return true;
-	      continue;
-	    }
+      ++retiredInsts_;
+      if (doStats)
+        accumulateInstructionStats(*di);
 
-	  ++retiredInsts_;
-	  if (doStats)
-	    accumulateInstructionStats(*di);
+      bool icountHit = (enableTriggers_ and isInterruptEnabled() and
+                        icountTriggerHit());
 
-	  bool icountHit = (enableTriggers_ and isInterruptEnabled() and
-			    icountTriggerHit());
+      if (trace)
+        {
+          if (traceFile)
+            printInstTrace(*di, counter, instStr, traceFile);
+          clearTraceData();
+        }
 
-	  if (trace)
-	    {
-	      if (traceFile)
-		printInstTrace(*di, counter, instStr, traceFile);
-	      clearTraceData();
-	    }
-
-	  if (icountHit)
-	    if (takeTriggerAction(traceFile, pc_, pc_, counter, false))
-	      return true;
-	}
-      catch (const CoreException& ce)
-	{
-	  if (ce.type() == CoreException::Stop)
-	    {
-	      if (trace)
-		{
-		  uint32_t inst = 0;
-		  readInst(currPc_, inst);
-		  if (traceFile)
-		    printInstTrace(inst, counter, instStr, traceFile);
-		  clearTraceData();
-		}
-	      success = ce.value() == 1; // Anything besides 1 is a fail.
-	      {
-		std::lock_guard<std::mutex> guard(printInstTraceMutex);
-		std::cerr << (success? "Successful " : "Error: Failed ")
-			  << "stop: " << ce.what() << ": " << ce.value()
-			  << "\n";
-		setTargetProgramFinished(true);
-	      }
-	      break;
-	    }
-	  if (ce.type() == CoreException::Exit)
-	    {
-	      std::lock_guard<std::mutex> guard(printInstTraceMutex);
-	      std::cerr << "Target program exited with code " << ce.value()
-			<< '\n';
-	      setTargetProgramFinished(true);
-	      break;
-	    }
-	  std::cerr << "Stopped -- unexpected exception\n";
-	}
+      if (icountHit)
+        if (takeTriggerAction(traceFile, pc_, pc_, counter, false))
+          return true;
     }
+#ifndef DISABLE_EXCEPTIONS
+    catch (const CoreException& ce)
+    {
+      if (ce.type() == CoreException::Stop)
+      {
+        if (trace)
+          {
+            uint32_t inst = 0;
+            readInst(currPc_, inst);
+            if (traceFile)
+              printInstTrace(inst, counter, instStr, traceFile);
+            clearTraceData();
+          }
+        success = ce.value() == 1; // Anything besides 1 is a fail.
+        {
+          std::lock_guard<std::mutex> guard(printInstTraceMutex);
+          std::cerr << (success? "Successful " : "Error: Failed ")
+                    << "stop: " << ce.what() << ": " << ce.value()
+                    << "\n";
+          setTargetProgramFinished(true);
+        }
+        break;
+      }
+      if (ce.type() == CoreException::Exit)
+      {
+        std::lock_guard<std::mutex> guard(printInstTraceMutex);
+        std::cerr << "Target program exited with code " << ce.value()
+                  << '\n';
+        setTargetProgramFinished(true);
+        break;
+      }
+      std::cerr << "Stopped -- unexpected exception\n";
+    }
+#endif
+  }
 
   // Update retired-instruction and cycle count registers.
   counter_ = counter;
@@ -3138,7 +3151,7 @@ Core<URV>::runUntilAddress(URV address, FILE* traceFile)
   struct timeval t1;
   gettimeofday(&t1, nullptr);
   double elapsed = (double(t1.tv_sec - t0.tv_sec) +
-		    double(t1.tv_usec - t0.tv_usec)*1e-6);
+                    double(t1.tv_usec - t0.tv_usec)*1e-6);
 
   uint64_t numInsts = counter_ - counter0;
 
@@ -3152,63 +3165,66 @@ bool
 Core<URV>::simpleRun()
 {
   bool success = true;
-
+#ifndef DISABLE_EXCEPTIONS
   try
+#endif
+  {
+    while (userOk)
     {
-      while (userOk) 
-	{
-	  currPc_ = pc_;
-	  ++cycleCount_;
-	  hasException_ = false;
+      currPc_ = pc_;
+      ++cycleCount_;
+      hasException_ = false;
 
-	  // Fetch/decode unless match in decode cache.
-	  uint32_t ix = (pc_ >> 1) & decodeCacheMask_;
-	  DecodedInst* di = &decodeCache_[ix];
-	  if (not di->isValid() or di->address() != pc_)
-	    {
-	      uint32_t inst = 0;
-	      if (not fetchInst(pc_, inst))
-		continue;
-	      decode(pc_, inst, *di);
-	    }
+      // Fetch/decode unless match in decode cache.
+      uint32_t ix = (pc_ >> 1) & decodeCacheMask_;
+      DecodedInst* di = &decodeCache_[ix];
+      if (not di->isValid() or di->address() != pc_)
+        {
+          uint32_t inst = 0;
+          if (not fetchInst(pc_, inst))
+            continue;
+          decode(pc_, inst, *di);
+        }
 
-	  bool doingWide = wideLdSt_;
+      bool doingWide = wideLdSt_;
 
-	  // Execute.
-	  pc_ += di->instSize();
-	  execute(di);
-	      
-	  if (doingWide)
-	    enableWideLdStMode(false);
+      // Execute.
+      pc_ += di->instSize();
+      execute(di);
+          
+      if (doingWide)
+        enableWideLdStMode(false);
 
-	  if (not hasException_)
-	    ++retiredInsts_;
-	}
+      if (not hasException_)
+        ++retiredInsts_;
     }
+  }
+#ifndef DISABLE_EXCEPTIONS
   catch (const CoreException& ce)
-    {
-      std::lock_guard<std::mutex> guard(printInstTraceMutex);
+  {
+    std::lock_guard<std::mutex> guard(printInstTraceMutex);
 
-      if (ce.type() == CoreException::Stop)
-	{
-	  ++retiredInsts_;
-	  success = ce.value() == 1; // Anything besides 1 is a fail.
-	  std::cerr << (success? "Successful " : "Error: Failed ")
-		    << "stop: " << ce.what() << ": " << ce.value() << '\n';
-	  setTargetProgramFinished(true);
-	}
-      else if (ce.type() == CoreException::Exit)
-	{
-	  std::cerr << "Target program exited with code " << ce.value() << '\n';
-	  success = ce.value() == 0;
-	  setTargetProgramFinished(true);
-	}
-      else
-	{
-	  success = false;
-	  std::cerr << "Stopped -- unexpected exception\n";
-	}
+    if (ce.type() == CoreException::Stop)
+    {
+      ++retiredInsts_;
+      success = ce.value() == 1; // Anything besides 1 is a fail.
+      std::cerr << (success? "Successful " : "Error: Failed ")
+          << "stop: " << ce.what() << ": " << ce.value() << '\n';
+      setTargetProgramFinished(true);
     }
+    else if (ce.type() == CoreException::Exit)
+    {
+      std::cerr << "Target program exited with code " << ce.value() << '\n';
+      success = ce.value() == 0;
+      setTargetProgramFinished(true);
+    }
+    else
+    {
+      success = false;
+      std::cerr << "Stopped -- unexpected exception\n";
+    }
+  }
+#endif
 
   return success;
 }
@@ -3267,7 +3283,7 @@ Core<URV>::run(FILE* file)
   struct timeval t1;
   gettimeofday(&t1, nullptr);
   double elapsed = (double(t1.tv_sec - t0.tv_sec) +
-		    double(t1.tv_usec - t0.tv_usec)*1e-6);
+                    double(t1.tv_usec - t0.tv_usec)*1e-6);
 
   reportInstsPerSec(retiredInsts_, elapsed, not userOk);
 
@@ -3284,7 +3300,7 @@ Core<URV>::isInterruptPossible(InterruptCause& cause)
 
   URV mstatus;
   if (not csRegs_.read(CsrNumber::MSTATUS, PrivilegeMode::Machine,
-		       debugMode_, mstatus))
+                       debugMode_, mstatus))
     return false;
 
   MstatusFields<URV> fields(mstatus);
@@ -3297,40 +3313,40 @@ Core<URV>::isInterruptPossible(InterruptCause& cause)
       csRegs_.read(CsrNumber::MIE, PrivilegeMode::Machine, debugMode_, mie))
     {
       if ((mie & mip) == 0)
-	return false;  // Nothing enabled is pending.
+        return false;  // Nothing enabled is pending.
 
       // Order of priority: machine, supervisor, user and then
       // external, software, timer and internal timers.
       if (mie & (1 << unsigned(InterruptCause::M_EXTERNAL)) & mip)
-	{
-	  cause = InterruptCause::M_EXTERNAL;
-	  return true;
-	}
+        {
+          cause = InterruptCause::M_EXTERNAL;
+          return true;
+        }
       if (mie & (1 << unsigned(InterruptCause::M_LOCAL)) & mip)
-	{
-	  cause = InterruptCause::M_LOCAL;
-	  return true;
-	}
+        {
+          cause = InterruptCause::M_LOCAL;
+          return true;
+        }
       if (mie & (1 << unsigned(InterruptCause::M_SOFTWARE)) & mip)
-	{
-	  cause = InterruptCause::M_SOFTWARE;
-	  return true;
-	}
+        {
+          cause = InterruptCause::M_SOFTWARE;
+          return true;
+        }
       if (mie & (1 << unsigned(InterruptCause::M_TIMER)) & mip)
-	{
-	  cause = InterruptCause::M_TIMER;
-	  return true;
-	}
+        {
+          cause = InterruptCause::M_TIMER;
+          return true;
+        }
       if (mie & (1 << unsigned(InterruptCause::M_INT_TIMER0)) & mip)
-	{
-	  cause = InterruptCause::M_INT_TIMER0;
-	  return true;
-	}
+        {
+          cause = InterruptCause::M_INT_TIMER0;
+          return true;
+        }
       if (mie & (1 << unsigned(InterruptCause::M_INT_TIMER1)) & mip)
-	{
-	  cause = InterruptCause::M_INT_TIMER1;
-	  return true;
-	}
+        {
+          cause = InterruptCause::M_INT_TIMER1;
+          return true;
+        }
     }
 
   return false;
@@ -3353,7 +3369,7 @@ Core<URV>::processExternalInterrupt(FILE* traceFile, std::string& instStr)
       uint32_t inst = 0; // Load interrupted inst.
       readInst(currPc_, inst);
       if (traceFile)  // Trace interrupted instruction.
-	printInstTrace(inst, counter_, instStr, traceFile, true);
+        printInstTrace(inst, counter_, instStr, traceFile, true);
       return true;
     }
 
@@ -3366,7 +3382,7 @@ Core<URV>::processExternalInterrupt(FILE* traceFile, std::string& instStr)
       uint32_t inst = 0; // Load interrupted inst.
       readInst(currPc_, inst);
       if (traceFile)  // Trace interrupted instruction.
-	printInstTrace(inst, counter_, instStr, traceFile, true);
+        printInstTrace(inst, counter_, instStr, traceFile, true);
       ++cycleCount_;
       return true;
     }
@@ -3393,7 +3409,7 @@ Core<URV>::invalidateDecodeCache(URV addr, unsigned storeSize)
       uint32_t cacheIx = instAddr & decodeCacheMask_;
       auto& entry = decodeCache_[cacheIx];
       if ((entry.address() >> 1) == instAddr)
-	entry.invalidate();
+        entry.invalidate();
     }
 }
 
@@ -3427,7 +3443,9 @@ Core<URV>::singleStep(FILE* traceFile)
   // know the changes after the execution of each instruction.
   bool doStats = instFreq_ or enableCounters_;
 
+#ifndef DISABLE_EXCEPTIONS
   try
+#endif
     {
       uint32_t inst = 0;
       currPc_ = pc_;
@@ -3440,39 +3458,39 @@ Core<URV>::singleStep(FILE* traceFile)
       ++counter_;
 
       if (processExternalInterrupt(traceFile, instStr))
-	return;  // Next instruction in interrupt handler.
+        return;  // Next instruction in interrupt handler.
 
       // Process pre-execute address trigger and fetch instruction.
       bool hasTrig = hasActiveInstTrigger();
       triggerTripped_ = hasTrig && instAddrTriggerHit(pc_,
-						      TriggerTiming::Before,
-						      isInterruptEnabled());
+                                                      TriggerTiming::Before,
+                                                      isInterruptEnabled());
       // Fetch instruction.
       bool fetchOk = true;
       if (triggerTripped_)
-	{
-	  if (not fetchInstPostTrigger(pc_, inst, traceFile))
-	    {
-	      ++cycleCount_;
-	      return;
-	    }
-	}
+        {
+          if (not fetchInstPostTrigger(pc_, inst, traceFile))
+            {
+              ++cycleCount_;
+              return;
+            }
+        }
       else
-	fetchOk = fetchInst(pc_, inst);
+        fetchOk = fetchInst(pc_, inst);
       if (not fetchOk)
-	{
-	  ++cycleCount_;
-	  if (traceFile)
-	    printInstTrace(inst, counter_, instStr, traceFile);
-	  if (dcsrStep_)
-	    enterDebugMode(DebugModeCause::STEP, pc_);
-	  return; // Next instruction in trap handler
-	}
+        {
+          ++cycleCount_;
+          if (traceFile)
+            printInstTrace(inst, counter_, instStr, traceFile);
+          if (dcsrStep_)
+            enterDebugMode(DebugModeCause::STEP, pc_);
+          return; // Next instruction in trap handler
+        }
 
       // Process pre-execute opcode trigger.
       if (hasTrig and instOpcodeTriggerHit(inst, TriggerTiming::Before,
-					   isInterruptEnabled()))
-	triggerTripped_ = true;
+                                           isInterruptEnabled()))
+        triggerTripped_ = true;
 
       DecodedInst di;
       decode(pc_, inst, di);
@@ -3484,38 +3502,38 @@ Core<URV>::singleStep(FILE* traceFile)
       execute(&di);
 
       if (doingWide)
-	enableWideLdStMode(false);
+        enableWideLdStMode(false);
 
       ++cycleCount_;
 
       if (hasException_)
-	{
-	  if (doStats)
-	    accumulateInstructionStats(di);
-	  if (traceFile)
-	    printInstTrace(inst, counter_, instStr, traceFile);
-	  if (dcsrStep_ and not ebreakInstDebug_)
-	    enterDebugMode(DebugModeCause::STEP, pc_);
-	  return;
-	}
+        {
+          if (doStats)
+            accumulateInstructionStats(di);
+          if (traceFile)
+            printInstTrace(inst, counter_, instStr, traceFile);
+          if (dcsrStep_ and not ebreakInstDebug_)
+            enterDebugMode(DebugModeCause::STEP, pc_);
+          return;
+        }
 
       if (triggerTripped_)
-	{
-	  undoForTrigger();
-	  takeTriggerAction(traceFile, currPc_, currPc_, counter_, true);
-	  return;
-	}
+        {
+          undoForTrigger();
+          takeTriggerAction(traceFile, currPc_, currPc_, counter_, true);
+          return;
+        }
 
       if (not isDebugModeStopCount(*this))
-	++retiredInsts_;
+        ++retiredInsts_;
       else if (not ebreakInstDebug_)
-	++retiredInsts_;
+        ++retiredInsts_;
 
       if (doStats)
-	accumulateInstructionStats(di);
+        accumulateInstructionStats(di);
 
       if (traceFile)
-	printInstTrace(inst, counter_, instStr, traceFile);
+        printInstTrace(inst, counter_, instStr, traceFile);
 
       // If a register is used as a source by an instruction then any
       // pending load with same register as target is removed from the
@@ -3524,53 +3542,55 @@ Core<URV>::singleStep(FILE* traceFile)
       // are handled in the load and loadRserve methods.
       const InstEntry* entry = di.instEntry();
       if (not entry->isLoad())
-	{
-	  if (entry->isIthOperandIntRegSource(0))
-	    removeFromLoadQueue(di.op0());
-	  if (entry->isIthOperandIntRegSource(1))
-	    removeFromLoadQueue(di.op1());
-	  if (entry->isIthOperandIntRegSource(2))
-	    removeFromLoadQueue(di.op2());
+        {
+          if (entry->isIthOperandIntRegSource(0))
+            removeFromLoadQueue(di.op0());
+          if (entry->isIthOperandIntRegSource(1))
+            removeFromLoadQueue(di.op1());
+          if (entry->isIthOperandIntRegSource(2))
+            removeFromLoadQueue(di.op2());
 
-	  // If a register is written by a non-load instruction, then
-	  // its entry is invalidated in the load queue.
-	  int regIx = intRegs_.getLastWrittenReg();
-	  if (regIx > 0)
-	    invalidateInLoadQueue(regIx);
-	}
+          // If a register is written by a non-load instruction, then
+          // its entry is invalidated in the load queue.
+          int regIx = intRegs_.getLastWrittenReg();
+          if (regIx > 0)
+            invalidateInLoadQueue(regIx);
+        }
 
       bool icountHit = (enableTriggers_ and isInterruptEnabled() and
-			icountTriggerHit());
+                        icountTriggerHit());
       if (icountHit)
-	{
-	  takeTriggerAction(traceFile, pc_, pc_, counter_, false);
-	  return;
-	}
+        {
+          takeTriggerAction(traceFile, pc_, pc_, counter_, false);
+          return;
+        }
 
       // If step bit set in dcsr then enter debug mode unless already there.
       if (dcsrStep_ and not ebreakInstDebug_)
-	enterDebugMode(DebugModeCause::STEP, pc_);
+        enterDebugMode(DebugModeCause::STEP, pc_);
     }
+#ifndef DISABLE_EXCEPTIONS
   catch (const CoreException& ce)
     {
       uint32_t inst = 0;
       readInst(currPc_, inst);
       if (ce.type() == CoreException::Stop)
-	{
-	  if (traceFile)
-	    printInstTrace(inst, counter_, instStr, traceFile);
-	  std::cerr << "Stopped...\n";
-	  setTargetProgramFinished(true);
-	}
+        {
+          if (traceFile)
+            printInstTrace(inst, counter_, instStr, traceFile);
+          std::cerr << "Stopped...\n";
+          setTargetProgramFinished(true);
+        }
       else if (ce.type() == CoreException::Exit)
-	{
-	  std::lock_guard<std::mutex> guard(printInstTraceMutex);
-	  std::cerr << "Target program exited with code " << ce.value() << '\n';
-	  setTargetProgramFinished(true);
-	}
+        {
+          std::lock_guard<std::mutex> guard(printInstTraceMutex);
+          std::cerr << "Target program exited with code " << ce.value() << '\n';
+          setTargetProgramFinished(true);
+        }
       else
-	std::cerr << "Unexpected exception\n";
+        std::cerr << "Unexpected exception\n";
     }
+#endif
 }
 
 
@@ -3658,25 +3678,25 @@ Core<URV>::whatIfSingStep(const DecodedInst& di, ChangeRecord& record)
       uint32_t operand = di.ithOperand(i);
 
       switch (di.ithOperandType(i))
-	{
-	case OperandType::None:
-	case OperandType::Imm:
-	  break;
-	case OperandType::IntReg:
-	  peekIntReg(operand, prev);
-	  prevRegValues[i] = prev;
-	  pokeIntReg(operand, di.ithOperandValue(i));
-	  break;
-	case OperandType::FpReg:
-	  peekFpReg(operand, prevRegValues[i]);
-	  pokeFpReg(operand, di.ithOperandValue(i));
-	  break;
-	case OperandType::CsReg:
-	  peekCsr(CsrNumber(operand), prev);
-	  prevRegValues[i] = prev;
-	  pokeCsr(CsrNumber(operand), di.ithOperandValue(i));
-	  break;
-	}
+        {
+        case OperandType::None:
+        case OperandType::Imm:
+          break;
+        case OperandType::IntReg:
+          peekIntReg(operand, prev);
+          prevRegValues[i] = prev;
+          pokeIntReg(operand, di.ithOperandValue(i));
+          break;
+        case OperandType::FpReg:
+          peekFpReg(operand, prevRegValues[i]);
+          pokeFpReg(operand, di.ithOperandValue(i));
+          break;
+        case OperandType::CsReg:
+          peekCsr(CsrNumber(operand), prev);
+          prevRegValues[i] = prev;
+          pokeCsr(CsrNumber(operand), di.ithOperandValue(i));
+          break;
+        }
     }
 
   // Execute instruction.
@@ -3694,20 +3714,20 @@ Core<URV>::whatIfSingStep(const DecodedInst& di, ChangeRecord& record)
       uint32_t operand = di.ithOperand(i);
 
       switch (di.ithOperandType(i))
-	{
-	case OperandType::None:
-	case OperandType::Imm:
-	  break;
-	case OperandType::IntReg:
-	  pokeIntReg(operand, prevRegValues[i]);
-	  break;
-	case OperandType::FpReg:
-	  pokeFpReg(operand, prevRegValues[i]);
-	  break;
-	case OperandType::CsReg:
-	  pokeCsr(CsrNumber(operand), prevRegValues[i]);
-	  break;
-	}
+        {
+        case OperandType::None:
+        case OperandType::Imm:
+          break;
+        case OperandType::IntReg:
+          pokeIntReg(operand, prevRegValues[i]);
+          break;
+        case OperandType::FpReg:
+          pokeFpReg(operand, prevRegValues[i]);
+          break;
+        case OperandType::CsReg:
+          pokeCsr(CsrNumber(operand), prevRegValues[i]);
+          break;
+        }
     }
 
   pc_ = prevPc;
@@ -3770,7 +3790,7 @@ Core<URV>::collectAndUndoWhatIfChanges(URV prevPc, ChangeRecord& record)
     {
       Csr<URV>* csr = csRegs_.getImplementedCsr(csrn);
       if (not csr)
-	continue;
+        continue;
 
       URV newVal = csr->read();
       URV oldVal = csr->prevValue();
@@ -4986,14 +5006,14 @@ Core<URV>::enableInstructionFrequency(bool b)
 
       auto regCount = intRegCount();
       for (auto& inst : instProfileVec_)
-	{
-	  inst.rd_.resize(regCount);
-	  inst.rs1_.resize(regCount);
-	  inst.rs2_.resize(regCount);
-	  inst.rs1Histo_.resize(13);  // FIX: avoid magic 13
-	  inst.rs2Histo_.resize(13);  // FIX: avoid magic 13
-	  inst.immHisto_.resize(13);  // FIX: avoid magic 13
-	}
+        {
+          inst.rd_.resize(regCount);
+          inst.rs1_.resize(regCount);
+          inst.rs2_.resize(regCount);
+          inst.rs1Histo_.resize(13);  // FIX: avoid magic 13
+          inst.rs2Histo_.resize(13);  // FIX: avoid magic 13
+          inst.immHisto_.resize(13);  // FIX: avoid magic 13
+        }
     }
 }
 
@@ -5008,15 +5028,15 @@ Core<URV>::enterDebugMode(DebugModeCause cause, URV pc)
   if (debugMode_)
     {
       if (debugStepMode_)
-	debugStepMode_ = false;
+        debugStepMode_ = false;
       else
-	std::cerr << "Error: Entering debug-halt while in debug-halt\n";
+        std::cerr << "Error: Entering debug-halt while in debug-halt\n";
     }
   else
     {
       debugMode_ = true;
       if (debugStepMode_)
-	std::cerr << "Error: Entering debug-halt with debug-step true\n";
+        std::cerr << "Error: Entering debug-halt with debug-step true\n";
       debugStepMode_ = false;
     }
 
@@ -5026,7 +5046,7 @@ Core<URV>::enterDebugMode(DebugModeCause cause, URV pc)
       value &= ~(URV(7) << 6);   // Clear cause field (starts at bit 6).
       value |= URV(cause) << 6;  // Set cause field
       if (nmiPending_)
-	value |= URV(1) << 3;    // Set nmip bit.
+        value |= URV(1) << 3;    // Set nmip bit.
       csRegs_.poke(CsrNumber::DCSR, value);
 
       csRegs_.poke(CsrNumber::DPC, pc);
@@ -5073,9 +5093,9 @@ Core<URV>::exitDebugMode()
   else
     {
       if (dcsrStep_)
-	debugStepMode_ = true;
+        debugStepMode_ = true;
       else
-	debugMode_ = false;
+        debugMode_ = false;
     }
 
   // If pending nmi bit is set in dcsr, set pending nmi in core
@@ -5236,10 +5256,10 @@ Core<URV>::checkShiftImmediate(URV imm)
   if (isRv64())
     {
       if (imm > 63)
-	{
-	  illegalInst();
-	  return false;
-	}
+        {
+          illegalInst();
+          return false;
+        }
       return true;
     }
 
@@ -5404,7 +5424,7 @@ Core<URV>::validateAmoAddr(URV addr, unsigned accessSize)
     {
       // Per spec cause is store-access-fault.
       if (not triggerTripped_)
-	initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
+        initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
       return false;
     }
 
@@ -5412,7 +5432,7 @@ Core<URV>::validateAmoAddr(URV addr, unsigned accessSize)
     {
       // Per spec cause is store-access-fault.
       if (not triggerTripped_)
-	initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
+        initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
       return false;
     }
 
@@ -5501,6 +5521,13 @@ Core<URV>::execEcall(const DecodedInst*)
     {
       URV a0 = emulateNewlib();
       intRegs_.write(RegA0, a0);
+      URV num = intRegs_.read(RegA7);
+#ifdef DISABLE_EXCEPTIONS
+      if(num == 93 || num == 94){
+        userOk = false;
+        std::lock_guard<std::mutex> guard(printInstTraceMutex);
+      }
+#endif
       return;
     }
 
@@ -5528,17 +5555,17 @@ Core<URV>::execEbreak(const DecodedInst*)
     {
       URV dcsrVal = 0;
       if (peekCsr(CsrNumber::DCSR, dcsrVal))
-	{
-	  if (dcsrVal & (URV(1) << 15))   // Bit ebreakm is on?
-	    {
-	      // The documentation (RISCV external debug support) does
-	      // not say whether or not we set EPC and MTVAL.
-	      enterDebugMode(DebugModeCause::EBREAK, currPc_);
-	      ebreakInstDebug_ = true;
-	      recordCsrWrite(CsrNumber::DCSR);
-	      return;
-	    }
-	}
+        {
+          if (dcsrVal & (URV(1) << 15))   // Bit ebreakm is on?
+            {
+              // The documentation (RISCV external debug support) does
+              // not say whether or not we set EPC and MTVAL.
+              enterDebugMode(DebugModeCause::EBREAK, currPc_);
+              ebreakInstDebug_ = true;
+              recordCsrWrite(CsrNumber::DCSR);
+              return;
+            }
+        }
     }
 
   // We do not update minstret on exceptions but it should be
@@ -5592,7 +5619,7 @@ Core<URV>::execMret(const DecodedInst*)
 
   // ... and putting it back
   if (not csRegs_.write(CsrNumber::MSTATUS, privMode_, debugMode_,
-			fields.value_))
+                        fields.value_))
     assert(0 and "Failed to write MSTATUS register\n");
 
   // TBD: Handle MPV.
@@ -5647,7 +5674,7 @@ Core<URV>::execSret(const DecodedInst*)
 
   // ... and putting it back
   if (not csRegs_.write(CsrNumber::SSTATUS, privMode_, debugMode_,
-			fields.value_))
+                        fields.value_))
     {
       illegalInst();
       return;
@@ -5702,7 +5729,7 @@ Core<URV>::execUret(const DecodedInst*)
 
   // ... and putting it back
   if (not csRegs_.write(CsrNumber::USTATUS, privMode_, debugMode_,
-			fields.value_))
+                        fields.value_))
     {
       illegalInst();
       return;
@@ -5760,7 +5787,7 @@ Core<URV>::updateStackChecker()
 template <typename URV>
 void
 Core<URV>::doCsrWrite(CsrNumber csr, URV csrVal, unsigned intReg,
-		      URV intRegVal)
+                      URV intRegVal)
 {
   if (not csRegs_.isWriteable(csr, privMode_, debugMode_))
     {
@@ -6023,7 +6050,7 @@ Core<URV>::store(URV base, URV addr, STORE_TYPE storeVal)
   if (misal and misalignedAccessCausesException(addr, stSize))
     {
       if (triggerTripped_)
-	return false;  // No exception if earlier trigger tripped.
+        return false;  // No exception if earlier trigger tripped.
       initiateStoreException(ExceptionCause::STORE_ADDR_MISAL, addr);
       return false;
     }
@@ -6039,7 +6066,7 @@ Core<URV>::store(URV base, URV addr, STORE_TYPE storeVal)
     {
       // No exception: consider store-data  trigger
       if (ldStDataTriggerHit(maskedVal, timing, isLoad, isInterruptEnabled()))
-	triggerTripped_ = true;
+        triggerTripped_ = true;
     }
   if (triggerTripped_)
     return false;
@@ -6060,28 +6087,38 @@ Core<URV>::store(URV base, URV addr, STORE_TYPE storeVal)
 
       // If we write to special location, end the simulation.
       if (toHostValid_ and addr == toHost_ and storeVal != 0)
-	{
-	  throw CoreException(CoreException::Stop, "write to to-host",
-			      toHost_, storeVal);
-	}
+        {
+#ifndef DISABLE_EXCEPTIONS
+          throw CoreException(CoreException::Stop, "write to to-host",
+                              toHost_, storeVal);
+#else
+          std::lock_guard<std::mutex> guard(printInstTraceMutex);
+          ++retiredInsts_;
+          std::cerr << (storeVal == 1? "Successful " : "Error: Failed ")
+              << "stop: " << "write to to-host" << ": " << storeVal << '\n';
+          setTargetProgramFinished(true);
+          userOk = false;
+          return false;
+#endif
+        }
 
       // If addr is special location, then write to console.
       if constexpr (sizeof(STORE_TYPE) == 1)
         {
-	  if (conIoValid_ and addr == conIo_)
-	    {
-	      if (consoleOut_)
-		fputc(storeVal, consoleOut_);
-	      return true;
-	    }
-	}
+          if (conIoValid_ and addr == conIo_)
+            {
+              if (consoleOut_)
+                fputc(storeVal, consoleOut_);
+              return true;
+            }
+        }
 
       if (maxStoreQueueSize_)
-	{
-	  uint64_t prevVal = 0;
-	  memory_.getLastWriteOldValue(prevVal);
-	  putInStoreQueue(sizeof(STORE_TYPE), addr, storeVal, prevVal);
-	}
+        {
+          uint64_t prevVal = 0;
+          memory_.getLastWriteOldValue(prevVal);
+          putInStoreQueue(sizeof(STORE_TYPE), addr, storeVal, prevVal);
+        }
       return true;
     }
 
@@ -6242,9 +6279,9 @@ Core<URV>::execDiv(const DecodedInst* di)
     {
       SRV minInt = SRV(1) << (intRegs_.regWidth() - 1);
       if (a == minInt and b == -1)
-	c = a;
+        c = a;
       else
-	c = a / b;  // Per spec: User-Level ISA, Version 2.3, Section 6.2
+        c = a / b;  // Per spec: User-Level ISA, Version 2.3, Section 6.2
     }
   intRegs_.write(di->op0(), c);
 }
@@ -6275,9 +6312,9 @@ Core<URV>::execRem(const DecodedInst* di)
     {
       SRV minInt = SRV(1) << (intRegs_.regWidth() - 1);
       if (a == minInt and b == -1)
-	c = 0;   // Per spec: User-Level ISA, Version 2.3, Section 6.2
+        c = 0;   // Per spec: User-Level ISA, Version 2.3, Section 6.2
       else
-	c = a % b;
+        c = a % b;
     }
   intRegs_.write(di->op0(), c);
 }
@@ -6650,7 +6687,7 @@ Core<URV>::effectiveRoundingMode(RoundingMode instMode)
 
   URV fcsrVal = 0;
   if (csRegs_.read(CsrNumber::FCSR, PrivilegeMode::Machine, debugMode_,
-		   fcsrVal))
+                   fcsrVal))
     {
       RoundingMode mode = RoundingMode((fcsrVal >> 5) & 0x7);
       return mode;
@@ -6672,22 +6709,22 @@ Core<URV>::updateAccruedFpBits()
       int flags = fetestexcept(FE_ALL_EXCEPT);
       
       if (flags & FE_INEXACT)
-	val |= URV(FpFlags::Inexact);
+        val |= URV(FpFlags::Inexact);
 
       if (flags & FE_UNDERFLOW)
-	val |= URV(FpFlags::Underflow);
+        val |= URV(FpFlags::Underflow);
 
       if (flags & FE_OVERFLOW)
-	val |= URV(FpFlags::Overflow);
+        val |= URV(FpFlags::Overflow);
       
       if (flags & FE_DIVBYZERO)
-	val |= URV(FpFlags::DivByZero);
+        val |= URV(FpFlags::DivByZero);
 
       if (flags & FE_INVALID)
-	val |= URV(FpFlags::Invalid);
+        val |= URV(FpFlags::Invalid);
 
       if (val != prev)
-	csRegs_.write(CsrNumber::FCSR, PrivilegeMode::Machine, debugMode_, val);
+        csRegs_.write(CsrNumber::FCSR, PrivilegeMode::Machine, debugMode_, val);
     }
 }
 
@@ -6734,9 +6771,9 @@ Core<URV>::execFlw(const DecodedInst* di)
 
       bool isLoad = true;
       if (ldStAddrTriggerHit(addr, Timing::Before, isLoad, isInterruptEnabled()))
-	triggerTripped_ = true;
+        triggerTripped_ = true;
       if (triggerTripped_)
-	return;
+        return;
     }
 
   if (eaCompatWithBase_)
@@ -7384,38 +7421,38 @@ Core<URV>::execFclass_s(const DecodedInst* di)
   if (type == FP_INFINITE)
     {
       if (pos)
-	result |= URV(FpClassifyMasks::PosInfinity);
+        result |= URV(FpClassifyMasks::PosInfinity);
       else
-	result |= URV(FpClassifyMasks::NegInfinity);
+        result |= URV(FpClassifyMasks::NegInfinity);
     }
   else if (type == FP_NORMAL)
     {
       if (pos)
-	result |= URV(FpClassifyMasks::PosNormal);
+        result |= URV(FpClassifyMasks::PosNormal);
       else
-	result |= URV(FpClassifyMasks::NegNormal);
+        result |= URV(FpClassifyMasks::NegNormal);
     }
   else if (type == FP_SUBNORMAL)
     {
       if (pos)
-	result |= URV(FpClassifyMasks::PosSubnormal);
+        result |= URV(FpClassifyMasks::PosSubnormal);
       else
-	result |= URV(FpClassifyMasks::NegSubnormal);
+        result |= URV(FpClassifyMasks::NegSubnormal);
     }
   else if (type == FP_ZERO)
     {
       if (pos)
-	result |= URV(FpClassifyMasks::PosZero);
+        result |= URV(FpClassifyMasks::PosZero);
       else
-	result |= URV(FpClassifyMasks::NegZero);
+        result |= URV(FpClassifyMasks::NegZero);
     }
   else if(type == FP_NAN)
     {
       bool quiet = mostSignificantFractionBit(f1);
       if (quiet)
-	result |= URV(FpClassifyMasks::QuietNan);
+        result |= URV(FpClassifyMasks::QuietNan);
       else
-	result |= URV(FpClassifyMasks::SignalingNan);
+        result |= URV(FpClassifyMasks::SignalingNan);
     }
 
   intRegs_.write(di->op0(), result);
@@ -7643,9 +7680,9 @@ Core<URV>::execFld(const DecodedInst* di)
 
       bool isLoad = true;
       if (ldStAddrTriggerHit(addr, Timing::Before, isLoad, isInterruptEnabled()))
-	triggerTripped_ = true;
+        triggerTripped_ = true;
       if (triggerTripped_)
-	return;
+        return;
     }
 
   if (eaCompatWithBase_)
@@ -8336,38 +8373,38 @@ Core<URV>::execFclass_d(const DecodedInst* di)
   if (type == FP_INFINITE)
     {
       if (pos)
-	result |= URV(FpClassifyMasks::PosInfinity);
+        result |= URV(FpClassifyMasks::PosInfinity);
       else
-	result |= URV(FpClassifyMasks::NegInfinity);
+        result |= URV(FpClassifyMasks::NegInfinity);
     }
   else if (type == FP_NORMAL)
     {
       if (pos)
-	result |= URV(FpClassifyMasks::PosNormal);
+        result |= URV(FpClassifyMasks::PosNormal);
       else
-	result |= URV(FpClassifyMasks::NegNormal);
+        result |= URV(FpClassifyMasks::NegNormal);
     }
   else if (type == FP_SUBNORMAL)
     {
       if (pos)
-	result |= URV(FpClassifyMasks::PosSubnormal);
+        result |= URV(FpClassifyMasks::PosSubnormal);
       else
-	result |= URV(FpClassifyMasks::NegSubnormal);
+        result |= URV(FpClassifyMasks::NegSubnormal);
     }
   else if (type == FP_ZERO)
     {
       if (pos)
-	result |= URV(FpClassifyMasks::PosZero);
+        result |= URV(FpClassifyMasks::PosZero);
       else
-	result |= URV(FpClassifyMasks::NegZero);
+        result |= URV(FpClassifyMasks::NegZero);
     }
   else if(type == FP_NAN)
     {
       bool quiet = mostSignificantFractionBit(d1);
       if (quiet)
-	result |= URV(FpClassifyMasks::QuietNan);
+        result |= URV(FpClassifyMasks::QuietNan);
       else
-	result |= URV(FpClassifyMasks::SignalingNan);
+        result |= URV(FpClassifyMasks::SignalingNan);
     }
 
   intRegs_.write(di->op0(), result);
@@ -8568,9 +8605,9 @@ Core<URV>::loadReserve(uint32_t rd, uint32_t rs1)
 
       bool isLoad = true;
       if (ldStAddrTriggerHit(addr, Timing::Before, isLoad, isInterruptEnabled()))
-	triggerTripped_ = true;
+        triggerTripped_ = true;
       if (triggerTripped_)
-	return;
+        return;
     }
 
   // Unsigned version of LOAD_TYPE
@@ -8602,7 +8639,7 @@ Core<URV>::loadReserve(uint32_t rd, uint32_t rs1)
 
       // Put entry in load queue with value of rd before this load.
       if (loadQueueEnabled_)
-	putInLoadQueue(ldSize, addr, rd, peekIntReg(rd));
+        putInLoadQueue(ldSize, addr, rd, peekIntReg(rd));
 
       intRegs_.write(rd, value);
     }
@@ -8649,7 +8686,7 @@ Core<URV>::storeConditional(URV addr, STORE_TYPE storeVal)
   if (misal)
     {
       if (triggerTripped_)
-	return false; // No exception if earlier trigger.
+        return false; // No exception if earlier trigger.
       initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
       return false;
     }
@@ -8657,7 +8694,7 @@ Core<URV>::storeConditional(URV addr, STORE_TYPE storeVal)
   if (amoIllegalOutsideDccm_ and not memory_.isAddrInDccm(addr))
     {
       if (triggerTripped_)
-	return false;  // No exception if earlier trigger.
+        return false;  // No exception if earlier trigger.
       initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
       return false;
     }
@@ -8666,7 +8703,7 @@ Core<URV>::storeConditional(URV addr, STORE_TYPE storeVal)
     {
       // No exception: consider store-data  trigger
       if (ldStDataTriggerHit(storeVal, timing, isLoad, isInterruptEnabled()))
-	triggerTripped_ = true;
+        triggerTripped_ = true;
     }
   if (triggerTripped_)
     return false;
@@ -8684,17 +8721,27 @@ Core<URV>::storeConditional(URV addr, STORE_TYPE storeVal)
 
       // If we write to special location, end the simulation.
       if (toHostValid_ and addr == toHost_ and storeVal != 0)
-	{
-	  throw CoreException(CoreException::Stop, "write to to-host",
-			      toHost_, storeVal);
-	}
+        {
+#ifndef DISABLE_EXCEPTIONS
+          throw CoreException(CoreException::Stop, "write to to-host",
+                              toHost_, storeVal);
+#else
+          std::lock_guard<std::mutex> guard(printInstTraceMutex);
+          ++retiredInsts_;
+          std::cerr << (storeVal == 1? "Successful " : "Error: Failed ")
+              << "stop: " << "write to to-host" << ": " << storeVal << '\n';
+          setTargetProgramFinished(true);
+          userOk = false;
+          return false;
+#endif
+        }
 
       if (maxStoreQueueSize_)
-	{
-	  uint64_t prevVal = 0;
-	  memory_.getLastWriteOldValue(prevVal);
-	  putInStoreQueue(sizeof(STORE_TYPE), addr, storeVal, prevVal);
-	}
+        {
+          uint64_t prevVal = 0;
+          memory_.getLastWriteOldValue(prevVal);
+          putInStoreQueue(sizeof(STORE_TYPE), addr, storeVal, prevVal);
+        }
       return true;
     }
   else
@@ -8756,12 +8803,12 @@ Core<URV>::execAmoadd_w(const DecodedInst* di)
       URV result = rs2Val + rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-	return;
+        return;
 
       bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -8788,12 +8835,12 @@ Core<URV>::execAmoswap_w(const DecodedInst* di)
       URV result = rs2Val;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-	return;
+        return;
 
       bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -8820,12 +8867,12 @@ Core<URV>::execAmoxor_w(const DecodedInst* di)
       URV result = rs2Val ^ rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-	return;
+        return;
 
       bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -8852,12 +8899,12 @@ Core<URV>::execAmoor_w(const DecodedInst* di)
       URV result = rs2Val | rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-	return;
+        return;
   
       bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -8884,12 +8931,12 @@ Core<URV>::execAmoand_w(const DecodedInst* di)
       URV result = rs2Val & rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-	return;
+        return;
 
       bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -8917,12 +8964,12 @@ Core<URV>::execAmomin_w(const DecodedInst* di)
       URV result = (SRV(rs2Val) < SRV(rdVal))? rs2Val : rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-	return;
+        return;
 
       bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -8951,12 +8998,12 @@ Core<URV>::execAmominu_w(const DecodedInst* di)
       uint32_t result = (w1 < w2)? w1 : w2;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-	return;
+        return;
 
       bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -8983,12 +9030,12 @@ Core<URV>::execAmomax_w(const DecodedInst* di)
       URV result = (SRV(rs2Val) > SRV(rdVal))? rs2Val : rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-	return;
+        return;
 
       bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9018,12 +9065,12 @@ Core<URV>::execAmomaxu_w(const DecodedInst* di)
       URV result = (w1 > w2)? w1 : w2;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-	return;
+        return;
 
       bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9087,12 +9134,12 @@ Core<URV>::execAmoadd_d(const DecodedInst* di)
       URV result = rs2Val + rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-	return;
+        return;
 
       bool storeOk = store<uint32_t>(addr, addr, result);
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9117,12 +9164,12 @@ Core<URV>::execAmoswap_d(const DecodedInst* di)
       URV result = rs2Val;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-	return;
+        return;
 
       bool storeOk = store<URV>(addr, addr, result);
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9147,12 +9194,12 @@ Core<URV>::execAmoxor_d(const DecodedInst* di)
       URV result = rs2Val ^ rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-	return;
+        return;
 
       bool storeOk = store<URV>(addr, addr, result);
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9177,12 +9224,12 @@ Core<URV>::execAmoor_d(const DecodedInst* di)
       URV result = rs2Val | rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-	return;
+        return;
 
       bool storeOk = store<URV>(addr, addr, result);
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9207,12 +9254,12 @@ Core<URV>::execAmoand_d(const DecodedInst* di)
       URV result = rs2Val & rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-	return;
+        return;
 
       bool storeOk = store<URV>(addr, addr, result);
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9237,12 +9284,12 @@ Core<URV>::execAmomin_d(const DecodedInst* di)
       URV result = (SRV(rs2Val) < SRV(rdVal))? rs2Val : rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-	return;
+        return;
 
       bool storeOk = store<URV>(addr, addr, result);
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9267,12 +9314,12 @@ Core<URV>::execAmominu_d(const DecodedInst* di)
       URV result = (rs2Val < rdVal)? rs2Val : rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-	return;
+        return;
 
       bool storeOk = store<URV>(addr, addr, result);
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9297,12 +9344,12 @@ Core<URV>::execAmomax_d(const DecodedInst* di)
       URV result = (SRV(rs2Val) > SRV(rdVal))? rs2Val : rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-	return;
+        return;
 
       bool storeOk = store<URV>(addr, addr, result);
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 
@@ -9327,12 +9374,12 @@ Core<URV>::execAmomaxu_d(const DecodedInst* di)
       URV result = (rs2Val > rdVal)? rs2Val : rdVal;
 
       if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-	return;
+        return;
 
       bool storeOk = store<URV>(addr, addr, result);
 
       if (storeOk and not triggerTripped_)
-	intRegs_.write(di->op0(), rdVal);
+        intRegs_.write(di->op0(), rdVal);
     }
 }
 

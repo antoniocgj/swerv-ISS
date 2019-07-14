@@ -117,7 +117,12 @@ Memory::Memory(size_t size, size_t pageSize, size_t regionSize)
     {
       std::cerr << "Failed to alloc " << size_ << " bytes using malloc.\n";
 #endif
+#ifndef DISABLE_EXCEPTIONS
       throw std::runtime_error("Out of memory");
+#else
+      std::cerr << "Out of memory\n";
+      exit(1);
+#endif
     }
 
   data_ = reinterpret_cast<uint8_t*>(mem);
