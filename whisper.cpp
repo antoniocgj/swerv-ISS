@@ -918,7 +918,7 @@ session(const Args& args, const CoreConfig& config)
 
   // Determine simulated memory size. Default to 4 gigs.
   // If running a 32-bit machine (pointer size = 32 bits), try 2 gigs.
-  size_t memorySize = size_t(1) << 20;  // 4 gigs
+  size_t memorySize = size_t(1) << 22;  // 4 gigs
   if (memorySize == 0)
     memorySize = size_t(1) << 31;  // 2 gigs
   config.getMemorySize(memorySize);

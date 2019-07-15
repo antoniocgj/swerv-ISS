@@ -1212,6 +1212,21 @@ Core<URV>::wideLoad(uint32_t rd, URV addr, unsigned ldSize)
   return true;
 }
 
+#ifdef __EMSCRIPTEN__
+
+#include <emscripten.h>
+
+EM_JS(int, jsReadMMIO, (int addr, int size), {
+	var value = mmio.load(addr, size);
+  return value;
+});
+
+EM_JS(void, jsWriteMMIO, (int addr, int size, int value), {
+	mmio.store(addr, size, value);
+});
+
+#endif
+
 
 template <typename URV>
 template <typename LOAD_TYPE>
@@ -1257,6 +1272,16 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
           return true;
         }
     }
+  
+#ifdef __EMSCRIPTEN__
+  // MMIO for javascript
+  if(addr > 0xffff0000){
+    int c = jsReadMMIO((int) addr, sizeof(LOAD_TYPE));
+    SRV val = c;
+    intRegs_.write(rd, val);
+    return true;
+  }
+#endif
 
   // Misaligned load from io section triggers an exception. Crossing
   // dccm to non-dccm causes an exception.
@@ -6028,7 +6053,7 @@ template <typename URV>
 template <typename STORE_TYPE>
 bool
 Core<URV>::store(URV base, URV addr, STORE_TYPE storeVal)
-{
+{  
   // ld/st-address or instruction-address triggers have priority over
   // ld/st access or misaligned exceptions.
   bool hasTrig = hasActiveTrigger();
@@ -6040,6 +6065,14 @@ Core<URV>::store(URV base, URV addr, STORE_TYPE storeVal)
 
   if (eaCompatWithBase_)
     forceAccessFail_ = forceAccessFail_ or effectiveAndBaseAddrMismatch(addr, base);
+
+#ifdef __EMSCRIPTEN__
+  // MMIO for javascript
+  if(addr > 0xffff0000){
+    jsWriteMMIO((int) addr, sizeof(STORE_TYPE), (int) storeVal);
+    return true;
+  }
+#endif
 
   // Misaligned store to io section causes an exception. Crossing dccm
   // to non-dccm causes an exception.

@@ -21,17 +21,18 @@ CXX := em++
 # Set the BOOST_ROOT environment variable to point to the base install
 # location of the Boost Libraries
 # BOOST_DIR := $(BOOST_ROOT)
-BOOST_DIR := /home/msc2017/ra134985/Documents/MC404_web/boost_1_68_0
+BOOST_DIR := /mnt/d/Unicamp/MC404/boost/boost_1_68_0
+# BOOST_DIR := /home/msc2017/ra134985/Documents/MC404_web/boost_1_68_0
 # For Various Installation types of Boost Library
 BOOST_INC := $(wildcard $(BOOST_DIR) $(BOOST_DIR)/include)
 
 # These boost libraries must be compiled with: "g++ -std=c++14" or "g++ -std=c++17"
 # For Various Installation types of Boost Library
 # BOOST_LIB_DIR := $(wildcard $(BOOST_DIR)/stage/lib $(BOOST_DIR)/lib)
-BOOST_LIB_DIR := /home/msc2017/ra134985/Documents/MC404_web/boost_1_68_0/stage/lib
+BOOST_LIB_DIR := /mnt/d/Unicamp/MC404/boost_lib
 
 # Specify only the basename of the Boost libraries
-BOOST_LIBS := /home/msc2017/ra134985/Documents/MC404_web/boost_1_68_0/stage/lib/libboost \
+BOOST_LIBS := /mnt/d/Unicamp/MC404/boost_lib/libboost \
 # BOOST_LIBS := /mnt/d/Unicamp/MC404/boost_lib/libboost_program_options \
               # /mnt/d/Unicamp/MC404/boost_lib/libboost_system
 
@@ -58,7 +59,7 @@ BUILD_DIR := build-$(shell uname -s)
 MKDIR_P ?= mkdir -p
 RM := rm -rf
 # Optimization flags.  Use -g for debug.
-OFLAGS := -O3 -Wno-c++11-narrowing  -fno-builtin -D__EMSCRIPTEN__
+OFLAGS := -O3 -Wno-c++11-narrowing  -fno-builtin -D__EMSCRIPTEN__ -DDISABLE_EXCEPTIONS
 
 # Include paths.
 IFLAGS := $(addprefix -I,$(BOOST_INC)) -I.
@@ -81,7 +82,7 @@ $(BUILD_DIR)/%.c.o:  %.c
 # Main target.(only linking)
 $(BUILD_DIR)/$(PROJECT): $(BUILD_DIR)/whisper.cpp.o \
                          $(BUILD_DIR)/librvcore.a
-	$(CXX) -o $@.js $^ $(LINK_DIRS) $(LINK_LIBS)
+	$(CXX) -o $@.js $^ $(LINK_DIRS) $(LINK_LIBS) 
 
 # List of all CPP sources needed for librvcore.a
 RVCORE_SRCS := IntRegs.cpp CsRegs.cpp FpRegs.cpp instforms.cpp \
