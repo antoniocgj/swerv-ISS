@@ -1221,6 +1221,11 @@ EM_JS(int, jsReadMMIO, (int addr, int size), {
   return value;
 });
 
+EM_JS(int, jsExternalInterrupt, (), {
+	var value = intController.interrupt;
+  return value;
+});
+
 EM_JS(void, jsWriteMMIO, (int addr, int size, int value), {
 	mmio.store(addr, size, value);
 });
@@ -3199,6 +3204,13 @@ Core<URV>::simpleRun()
       currPc_ = pc_;
       ++cycleCount_;
       hasException_ = false;
+      
+      InterruptCause cause;
+      if (0 && isInterruptPossible(cause))
+      {
+        initiateInterrupt(cause, pc_);
+        ++cycleCount_;
+      }
 
       // Fetch/decode unless match in decode cache.
       uint32_t ix = (pc_ >> 1) & decodeCacheMask_;
@@ -3337,6 +3349,12 @@ Core<URV>::isInterruptPossible(InterruptCause& cause)
       and
       csRegs_.read(CsrNumber::MIE, PrivilegeMode::Machine, debugMode_, mie))
     {
+
+#ifdef __EMSCRIPTEN__
+      if((mie & (1 << unsigned(InterruptCause::M_EXTERNAL))) && jsExternalInterrupt()){
+        mip |= (1 << unsigned(InterruptCause::M_EXTERNAL));
+      }
+#endif
       if ((mie & mip) == 0)
         return false;  // Nothing enabled is pending.
 
