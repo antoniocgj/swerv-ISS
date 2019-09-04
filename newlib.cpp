@@ -39,7 +39,7 @@
 #include <emscripten.h>
 
 EM_JS(int, customSyscall, (int a0, int a1, int a2, int a3, int a7), {
-	var value = syscall_emulator.run(int a0, int a1, int a2, int a3, int a7);
+	var value = syscall_emulator.run(a0, a1, a2, a3, a7);
   return value;
 });
 

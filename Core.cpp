@@ -1226,6 +1226,11 @@ EM_JS(int, jsExternalInterrupt, (), {
   return value;
 });
 
+EM_JS(int, jsInterruptEnabled, (), {
+	var value = intController.interruptEnabled;
+  return value;
+});
+
 EM_JS(void, jsWriteMMIO, (int addr, int size, int value), {
 	mmio.store(addr, size, value);
 });
@@ -3199,6 +3204,10 @@ bool
 Core<URV>::simpleRun()
 {
   bool success = true;
+#ifdef __EMSCRIPTEN__
+  int simEnableInterrupt = jsInterruptEnabled();
+#endif
+
 #ifndef DISABLE_EXCEPTIONS
   try
 #endif
@@ -3208,13 +3217,17 @@ Core<URV>::simpleRun()
       currPc_ = pc_;
       ++cycleCount_;
       hasException_ = false;
-      
-      InterruptCause cause;
-      if (0 && isInterruptPossible(cause))
-      {
-        initiateInterrupt(cause, pc_);
-        ++cycleCount_;
+
+#ifdef __EMSCRIPTEN__  
+      if(simEnableInterrupt){
+        InterruptCause cause;
+        if (isInterruptPossible(cause))
+        {
+          initiateInterrupt(cause, pc_);
+          ++cycleCount_;
+        }
       }
+#endif
 
       // Fetch/decode unless match in decode cache.
       uint32_t ix = (pc_ >> 1) & decodeCacheMask_;
