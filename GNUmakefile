@@ -59,7 +59,7 @@ BUILD_DIR := build-$(shell uname -s)
 MKDIR_P ?= mkdir -p
 RM := rm -rf
 # Optimization flags.  Use -g for debug.
-OFLAGS := -O3 -Wno-c++11-narrowing  -fno-builtin -D__EMSCRIPTEN__ -DDISABLE_EXCEPTIONS
+OFLAGS := -O3 -Wno-c++11-narrowing  -fno-builtin -D__EMSCRIPTEN__ -DDISABLE_EXCEPTIONS -s TOTAL_MEMORY=150994944
 
 # Include paths.
 IFLAGS := $(addprefix -I,$(BOOST_INC)) -I.
@@ -82,7 +82,7 @@ $(BUILD_DIR)/%.c.o:  %.c
 # Main target.(only linking)
 $(BUILD_DIR)/$(PROJECT): $(BUILD_DIR)/whisper.cpp.o \
                          $(BUILD_DIR)/librvcore.a
-	$(CXX) -o $@.js $^ $(LINK_DIRS) $(LINK_LIBS) 
+	$(CXX) -o $@.js $^ $(LINK_DIRS) $(LINK_LIBS) -s TOTAL_MEMORY=150994944
 
 # List of all CPP sources needed for librvcore.a
 RVCORE_SRCS := IntRegs.cpp CsRegs.cpp FpRegs.cpp instforms.cpp \
