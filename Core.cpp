@@ -1281,6 +1281,10 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
 #ifdef __EMSCRIPTEN__
   // MMIO for javascript
   if(addr > 0xffff0000){
+    if (privMode_ == PrivilegeMode::User){
+      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, sizeof(LOAD_TYPE));
+      return false;
+    }
     int c = jsReadMMIO((int) addr, sizeof(LOAD_TYPE));
     SRV val = c;
     intRegs_.write(rd, val);
@@ -6087,6 +6091,10 @@ Core<URV>::store(URV base, URV addr, STORE_TYPE storeVal)
 #ifdef __EMSCRIPTEN__
   // MMIO for javascript
   if(addr > 0xffff0000){
+    if (privMode_ == PrivilegeMode::User){
+      initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
+      return false;
+    }
     jsWriteMMIO((int) addr, sizeof(STORE_TYPE), (int) storeVal);
     return true;
   }
