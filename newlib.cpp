@@ -34,6 +34,17 @@
 
 #include "Core.hpp"
 
+#ifdef __EMSCRIPTEN__
+
+#include <emscripten.h>
+
+EM_JS(int, customSyscall, (int a0, int a1, int a2, int a3, int a7), {
+	var value = syscall_emulator.run(int a0, int a1, int a2, int a3, int a7);
+  return value;
+});
+
+#endif
+
 
 using namespace WdRiscv;
 
@@ -532,6 +543,13 @@ Core<URV>::emulateNewlib()
     default:
       break;
     }
+
+#ifdef __EMSCRIPTEN__
+  if(num > 2000){
+    int r = customSyscall(a0, a1, a2, a3, num);
+    return URV(r);
+  }
+#endif
 
   std::cerr << "Unimplemented syscall number " << num << "\n";
   return -1;
