@@ -20,8 +20,8 @@
 #include <fstream>
 #include <sstream>
 #include <string>
-#include <math.h>
-#include <stdlib.h>
+#include <cmath>
+#include <cstdlib>
 #ifndef __MINGW64__
 #include <sys/mman.h>
 #endif
@@ -32,7 +32,7 @@ using namespace WdRiscv;
 
 
 Memory::Memory(size_t size, size_t pageSize, size_t regionSize)
-  : size_(size), data_(nullptr), pageSize_(pageSize)
+  : size_(size), data_(nullptr), pageSize_(pageSize), reservations_(1), lastWriteData_(1)
 { 
   if ((size & 4) != 0)
     {
@@ -256,22 +256,47 @@ Memory::loadHexFile(const std::string& fileName)
 
 
 bool
-Memory::loadElfFile(const std::string& fileName, size_t& entryPoint,
-		    size_t& exitPoint)
+Memory::loadElfFile(const std::string& fileName, unsigned regWidth,
+		    size_t& entryPoint, size_t& end)
 {
   entryPoint = 0;
+  end = 0;
 
   ELFIO::elfio reader;
 
-  if (not reader.load(fileName))
+  if (regWidth != 32 and regWidth != 64)
     {
-      std::cerr << "Failed to load ELF file " << fileName << '\n';
+      std::cerr << "Error: Memory::loadElfFile called with a unsupported "
+		<< "register width: " << regWidth << '\n';
       return false;
     }
 
-  if (reader.get_class() != ELFCLASS32 and reader.get_class() != ELFCLASS64)
+  if (not reader.load(fileName))
     {
-      std::cerr << "Only 32/64-bit ELFs are currently supported\n";
+      std::cerr << "Error: Failed to load ELF file " << fileName << '\n';
+      return false;
+    }
+
+  bool is32 = reader.get_class() == ELFCLASS32;
+  bool is64 = reader.get_class() == ELFCLASS64;
+  if (not (is32 or is64))
+    {
+      std::cerr << "Error: ELF file is neither 32 nor 64-bit. Only 32/64-bit ELFs are currently supported\n";
+      return false;
+    }
+
+  if (regWidth == 32 and not is32)
+    {
+      if (is64)
+	std::cerr << "Error: Loading a 64-bit ELF file in 32-bit mode.\n";
+      else
+	std::cerr << "Error: Loading non-32-bit ELF file in 32-bit mode.\n";
+      return false;
+    }
+
+  if (regWidth == 64 and not is64)
+    {
+      std::cerr << "Error: Loading non-64-bit ELF file in 64-bit mode.\n";
       return false;
     }
 
@@ -345,7 +370,10 @@ Memory::loadElfFile(const std::string& fileName, size_t& entryPoint,
       errors++;
     }
 
-  clearLastWriteInfo();
+  // In case writing ELF data modified last-written-data associated
+  // with each hart.
+  for (unsigned hartId = 0; hartId < reservations_.size(); ++hartId)
+    clearLastWriteInfo(hartId);
 
   // Collect symbols.
   for (int secIx = 0; secIx < secCount; ++secIx)
@@ -380,9 +408,7 @@ Memory::loadElfFile(const std::string& fileName, size_t& entryPoint,
   if (not errors)
     {
       entryPoint = reader.get_entry();
-      exitPoint = maxEnd;
-      if (symbols_.count("_finish"))
-	exitPoint = symbols_.at("_finish").addr_;
+      end = maxEnd;
     }
 
   if (overwrites)
@@ -476,6 +502,64 @@ Memory::getElfFileAddressBounds(const std::string& fileName, size_t& minAddr,
 }
 
 
+bool
+Memory::checkElfFile(const std::string& path, bool& is32bit,
+		     bool& is64bit, bool& isRiscv)
+{
+  ELFIO::elfio reader;
+
+  if (not reader.load(path))
+    return false;
+
+  is32bit = reader.get_class() == ELFCLASS32;
+  is64bit = reader.get_class() == ELFCLASS64;
+  isRiscv = reader.get_machine() == EM_RISCV;
+
+  return true;
+}
+
+
+bool
+Memory::isSymbolInElfFile(const std::string& path, const std::string& target)
+{
+  ELFIO::elfio reader;
+
+  if (not reader.load(path))
+    return false;
+
+  auto secCount = reader.sections.size();
+  for (int secIx = 0; secIx < secCount; ++secIx)
+    {
+      auto sec = reader.sections[secIx];
+      if (sec->get_type() != SHT_SYMTAB)
+	continue;
+
+      const ELFIO::symbol_section_accessor symAccesor(reader, sec);
+      ELFIO::Elf64_Addr address = 0;
+      ELFIO::Elf_Xword size = 0;
+      unsigned char bind, type, other;
+      ELFIO::Elf_Half index = 0;
+
+      // Finding symbol by name does not work. Walk all the symbols.
+      ELFIO::Elf_Xword symCount = symAccesor.get_symbols_num();
+      for (ELFIO::Elf_Xword symIx = 0; symIx < symCount; ++symIx)
+	{
+	  std::string name;
+	  if (symAccesor.get_symbol(symIx, name, address, size, bind, type,
+				    index, other))
+	    {
+	      if (name.empty())
+		continue;
+	      if (type == STT_NOTYPE or type == STT_FUNC or type == STT_OBJECT)
+		if (name == target)
+		  return true;
+	    }
+	}
+    }
+  return false;
+}
+
+
 void
 Memory::copy(const Memory& other)
 {
@@ -496,13 +580,8 @@ Memory::writeByteNoAccessCheck(size_t addr, uint8_t value)
   unsigned byteIx = addr & 3;
   value = value & uint8_t((mask >> (byteIx*8)));
 
-  prevWriteValue_ = *(data_ + addr);
-
   data_[addr] = value;
-  lastWriteSize_ = 1;
-  lastWriteAddr_ = addr;
-  lastWriteValue_ = value;
-  lastWriteIsDccm_ = attrib.isDccm();
+
   return true;
 }
 
@@ -555,7 +634,7 @@ Memory::checkCcmConfig(const std::string& tag, size_t region, size_t offset,
 
 bool
 Memory::checkCcmOverlap(const std::string& tag, size_t region, size_t offset,
-			size_t size)
+			size_t size, bool iccm, bool dccm, bool pic)
 {
   // If a region is ever configured, then only the configured parts
   // are available (accessible).
@@ -577,13 +656,19 @@ Memory::checkCcmOverlap(const std::string& tag, size_t region, size_t offset,
   size_t addr = region * regionSize_ + offset;
   size_t ix0 = getPageIx(addr);
   size_t ix1 = getPageIx(addr + size);
-  for (size_t ix = ix0; ix <= ix1; ++ix)
+  for (size_t ix = ix0; ix < ix1; ++ix)
     {
-      if (attribs_.at(ix).isMapped())
+      auto& attrib = attribs_.at(ix);
+      if (attrib.isMapped())
 	{
-	  std::cerr << tag << " area at address " << addr << " overlaps "
-		    << " a previously defined area.\n";
-	  return false;
+	  if ((iccm and not attrib.isIccm()) or
+	      (dccm and not attrib.isDccm()) or
+	      (pic  and not attrib.isMemMappedReg()))
+	    {
+	      std::cerr << tag << " area at address " << addr << " overlaps"
+			<< " a previously defined area.\n";
+	      return false;
+	    }
 	}
     }
 
@@ -597,7 +682,7 @@ Memory::defineIccm(size_t region, size_t offset, size_t size)
   if (not checkCcmConfig("ICCM", region, offset, size))
     return false;
 
-  checkCcmOverlap("ICCM", region, offset, size);
+  checkCcmOverlap("ICCM", region, offset, size, true, false, false);
 
   size_t addr = region * regionSize_ + offset;
   size_t ix = getPageIx(addr);
@@ -608,7 +693,7 @@ Memory::defineIccm(size_t region, size_t offset, size_t size)
     {
       auto& attrib = attribs_.at(ix + i);
       attrib.setExec(true);
-      attrib.setRead(true);
+      // attrib.setRead(true);
       attrib.setIccm(true);
     }
   return true;
@@ -621,7 +706,7 @@ Memory::defineDccm(size_t region, size_t offset, size_t size)
   if (not checkCcmConfig("DCCM", region, offset, size))
     return false;
 
-  checkCcmOverlap("DCCM", region, offset, size);
+  checkCcmOverlap("DCCM", region, offset, size, false, true, false);
 
   size_t addr = region * regionSize_ + offset;
   size_t ix = getPageIx(addr);
@@ -646,7 +731,7 @@ Memory::defineMemoryMappedRegisterRegion(size_t region, size_t offset,
   if (not checkCcmConfig("PIC memory", region, offset, size))
     return false;
 
-  checkCcmOverlap("PIC memory", region, offset, size);
+  checkCcmOverlap("PIC memory", region, offset, size, false, false, true);
 
   size_t addr = region * regionSize_ + offset;
   size_t pageIx = getPageIx(addr);
@@ -793,7 +878,24 @@ Memory::finishCcmConfig()
 	}
 
       if (hasInst and hasData)
-	continue;
+	{
+	  // Make ICCM pages non-read and non-write. Make DCCM pages
+	  // non-exec.
+	  size_t pageIx = getPageIx(addr);
+	  for (size_t i = 0; i < pageCount; ++i, ++pageIx)
+	    {
+	      PageAttribs& attrib = attribs_.at(pageIx);
+	      if (attrib.isExec())
+		{
+		  attrib.setWrite(false);
+		  attrib.setRead(false);
+		}
+	      else if (attrib.isWrite())
+		attrib.setExec(false);
+	    }
+
+	  continue;
+	}
 
       if (hasInst)
 	{

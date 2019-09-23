@@ -18,7 +18,7 @@
 
 #include <iostream>
 #include <algorithm>
-#include <assert.h>
+#include <cassert>
 #include "CsRegs.hpp"
 
 
@@ -87,8 +87,8 @@ CsRegs<URV>::defineCsr(const std::string& name, CsrNumber csrn, bool mandatory,
 
 
 template <typename URV>
-const Csr<URV>*
-CsRegs<URV>::findCsr(const std::string& name) const
+Csr<URV>*
+CsRegs<URV>::findCsr(const std::string& name)
 {
   const auto iter = nameToNumber_.find(name);
   if (iter == nameToNumber_.end())
@@ -103,8 +103,8 @@ CsRegs<URV>::findCsr(const std::string& name) const
 
 
 template <typename URV>
-const Csr<URV>*
-CsRegs<URV>::findCsr(CsrNumber number) const
+Csr<URV>*
+CsRegs<URV>::findCsr(CsrNumber number)
 {
   size_t ix = size_t(number);
   if (ix >= regs_.size())
@@ -204,7 +204,7 @@ CsRegs<URV>::write(CsrNumber number, PrivilegeMode mode, bool debugMode,
   if (number == CsrNumber::MDEAU)
     lockMdseac(false);
 
-  // Writing of the MEIVT changes the base address in MEIHAP.
+  // Writing MEIVT changes the base address in MEIHAP.
   if (number == CsrNumber::MEIVT)
     {
       value = (value >> 10) << 10;  // Clear least sig 10 bits keeping base.
@@ -266,8 +266,8 @@ CsRegs<URV>::reset()
 
 template <typename URV>
 bool
-CsRegs<URV>::configCsr(const std::string& name, bool implemented,
-		       URV resetValue, URV mask, URV pokeMask, bool isDebug)
+CsRegs<URV>::configCsr(const std::string& name, bool implemented, URV resetValue,
+                       URV mask, URV pokeMask, bool isDebug, bool shared)
 {
   auto iter = nameToNumber_.find(name);
   if (iter == nameToNumber_.end())
@@ -278,14 +278,14 @@ CsRegs<URV>::configCsr(const std::string& name, bool implemented,
     return false;
 
   return configCsr(CsrNumber(num), implemented, resetValue, mask, pokeMask,
-		   isDebug);
+		   isDebug, shared);
 }
 
 
 template <typename URV>
 bool
-CsRegs<URV>::configCsr(CsrNumber csrNum, bool implemented,
-		       URV resetValue, URV mask, URV pokeMask, bool isDebug)
+CsRegs<URV>::configCsr(CsrNumber csrNum, bool implemented, URV resetValue,
+                       URV mask, URV pokeMask, bool isDebug, bool shared)
 {
   if (size_t(csrNum) >= regs_.size())
     {
@@ -308,6 +308,7 @@ CsRegs<URV>::configCsr(CsrNumber csrNum, bool implemented,
   csr.setPokeMask(pokeMask);
   csr.pokeNoMask(resetValue);
   csr.setIsDebug(isDebug);
+  csr.setIsShared(shared);
 
   // Cahche interrupt enable.
   if (csrNum == CsrNumber::MSTATUS)
@@ -332,6 +333,7 @@ CsRegs<URV>::configMachineModePerfCounters(unsigned numCounters)
     }
 
   unsigned errors = 0;
+  bool shared = false;
 
   for (unsigned i = 0; i < 29; ++i)
     {
@@ -341,18 +343,21 @@ CsRegs<URV>::configMachineModePerfCounters(unsigned numCounters)
 
       CsrNumber csrNum = CsrNumber(i + unsigned(CsrNumber::MHPMCOUNTER3));
       bool isDebug = false;
-      if (not configCsr(csrNum, true, resetValue, mask, pokeMask, isDebug))
+      if (not configCsr(csrNum, true, resetValue, mask, pokeMask, isDebug,
+                        shared))
 	errors++;
 
       if constexpr (sizeof(URV) == 4)
          {
 	   csrNum = CsrNumber(i + unsigned(CsrNumber::MHPMCOUNTER3H));
-	   if (not configCsr(csrNum, true, resetValue, mask, pokeMask, isDebug))
+	   if (not configCsr(csrNum, true, resetValue, mask, pokeMask,
+                             isDebug, shared))
 	     errors++;
 	 }
 
       csrNum = CsrNumber(i + unsigned(CsrNumber::MHPMEVENT3));
-      if (not configCsr(csrNum, true, resetValue, mask, pokeMask, isDebug))
+      if (not configCsr(csrNum, true, resetValue, mask, pokeMask, isDebug,
+                        shared))
 	errors++;
     }
 
@@ -515,6 +520,7 @@ CsRegs<URV>::defineMachineRegs()
   defineCsr("mtvec", Csrn::MTVEC, mand, imp, 0, mask, mask);
 
   defineCsr("mcounteren", Csrn::MCOUNTEREN, !mand, !imp, 0, 0, 0);
+  defineCsr("mcountinhibit", Csrn::MCOUNTINHIBIT, !mand, !imp, 0, 0, 0);
 
   // Machine trap handling: mscratch and mepc.
   defineCsr("mscratch", Csrn::MSCRATCH, mand, imp, 0, wam, wam);
@@ -575,6 +581,34 @@ CsRegs<URV>::defineMachineRegs()
       csrNum = CsrNumber(unsigned(CsrNumber::MHPMEVENT3) + i - 3);
       name = "mhpmevent" + std::to_string(i);
       defineCsr(name, csrNum, mand, imp, 0, rom, rom);
+    }
+}
+
+
+template <typename URV>
+void
+CsRegs<URV>::tieSharedCsrsTo(CsRegs<URV>& target)
+{
+  if (this == &target)
+    return;
+
+  assert(regs_.size() == target.regs_.size());
+  for (size_t i = 0; i < regs_.size(); ++i)
+    {
+      CsrNumber csrn = CsrNumber(i);
+      auto csr = getImplementedCsr(csrn);
+      auto targetCsr = target.getImplementedCsr(csrn);
+       if (csr)
+        {
+          assert(targetCsr);
+          if (csr->isShared())
+            {
+              assert(targetCsr->isShared());
+              csr->tie(targetCsr->valuePtr_);
+            }
+        }
+      else
+        assert(not targetCsr);
     }
 }
 
@@ -821,6 +855,8 @@ CsRegs<URV>::defineNonStandardRegs()
 
   mask = 1;  // Only least sig bit writeable
   defineCsr("mgpmc",  Csrn::MGPMC,    !mand, imp, 1, mask, mask);
+
+  defineCsr("mscause",  Csrn::MSCAUSE, !mand, !imp, 0, wam, wam);
 }
 
 
@@ -889,6 +925,21 @@ CsRegs<URV>::poke(CsrNumber number, URV value)
     {
       MstatusFields<URV> fields(csr->read());
       interruptEnable_ = fields.bits_.MIE;
+    }
+
+  // Poking MDEAU unlocks mdseac.
+  if (number == CsrNumber::MDEAU)
+    lockMdseac(false);
+
+  // Poking MEIVT changes the base address in MEIHAP.
+  if (number == CsrNumber::MEIVT)
+    {
+      value = (value >> 10) << 10;  // Clear least sig 10 bits keeping base.
+      size_t meihapIx = size_t(CsrNumber::MEIHAP);
+      URV meihap = regs_.at(meihapIx).read();
+      meihap &= 0x3ff;  // Clear base address bits.
+      meihap |= value;  // Copy base address bits from MEIVT.
+      regs_.at(meihapIx).poke(meihap);
     }
 
   return true;

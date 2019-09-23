@@ -84,15 +84,15 @@ parseCmdLineNumber(const std::string& option,
 
 
 template <typename URV>
-Interactive<URV>::Interactive(std::vector< Core<URV>* >& coreVec)
-  : cores_(coreVec)
+Interactive<URV>::Interactive(std::vector< Hart<URV>* >& harts)
+  : harts_(harts)
 {
 }
 
 
 template <typename URV>
 bool
-Interactive<URV>::untilCommand(Core<URV>& core, const std::string& line,
+Interactive<URV>::untilCommand(Hart<URV>& hart, const std::string& line,
 			       const std::vector<std::string>& tokens,
 			       FILE* traceFile)
 {
@@ -107,20 +107,28 @@ Interactive<URV>::untilCommand(Core<URV>& core, const std::string& line,
   if (not parseCmdLineNumber("address", tokens.at(1), addr))
     return false;
 
-  return core.untilAddress(addr, traceFile);
+  return hart.untilAddress(addr, traceFile);
 }
 
 
 template <typename URV>
 bool
-Interactive<URV>::stepCommand(Core<URV>& core, const std::string& /*line*/,
+Interactive<URV>::stepCommand(Hart<URV>& hart, const std::string& /*line*/,
 			      const std::vector<std::string>& tokens,
 			      FILE* traceFile)
 {
+  if (not hart.isStarted())
+    {
+      // WD special.
+      std::cerr << "Cannot step a non-started hart: Consider writing "
+                << "the mhartstart CSR\n";
+      return false;
+    }
+
   if (tokens.size() == 1)
     {
-      core.singleStep(traceFile);
-      core.clearTraceData();
+      hart.singleStep(traceFile);
+      hart.clearTraceData();
       return true;
     }
 
@@ -133,8 +141,8 @@ Interactive<URV>::stepCommand(Core<URV>& core, const std::string& /*line*/,
 
   for (uint64_t i = 0; i < count; ++i)
     {
-      core.singleStep(traceFile);
-      core.clearTraceData();
+      hart.singleStep(traceFile);
+      hart.clearTraceData();
     }
 
   return true;
@@ -144,12 +152,12 @@ Interactive<URV>::stepCommand(Core<URV>& core, const std::string& /*line*/,
 template <typename URV>
 static
 void
-peekAllFpRegs(Core<URV>& core)
+peekAllFpRegs(Hart<URV>& hart)
 {
-  for (unsigned i = 0; i < core.fpRegCount(); ++i)
+  for (unsigned i = 0; i < hart.fpRegCount(); ++i)
     {
       uint64_t val = 0;
-      if (core.peekFpReg(i, val))
+      if (hart.peekFpReg(i, val))
 	{
 	  std::cout << "f" << i << ": "
 		    << (boost::format("0x%016x") % val) << '\n';
@@ -161,16 +169,16 @@ peekAllFpRegs(Core<URV>& core)
 template <typename URV>
 static
 void
-peekAllIntRegs(Core<URV>& core)
+peekAllIntRegs(Hart<URV>& hart)
 {
-  bool abiNames = core.abiNames();
+  bool abiNames = hart.abiNames();
   auto hexForm = getHexForm<URV>(); // Format string for printing a hex val
 
-  for (unsigned i = 0; i < core.intRegCount(); ++i)
+  for (unsigned i = 0; i < hart.intRegCount(); ++i)
     {
       std::string name;
       URV val = 0;
-      if (core.peekIntReg(i, val, name))
+      if (hart.peekIntReg(i, val, name))
 	{
 	  std::string tag = name;
 	  if (abiNames)
@@ -187,7 +195,7 @@ peekAllIntRegs(Core<URV>& core)
 template <typename URV>
 static
 void
-peekAllCsrs(Core<URV>& core)
+peekAllCsrs(Hart<URV>& hart)
 {
   auto hexForm = getHexForm<URV>(); // Format string for printing a hex val
 
@@ -204,7 +212,7 @@ peekAllCsrs(Core<URV>& core)
       CsrNumber csr = CsrNumber(i);
       std::string name;
       URV val = 0;
-      if (core.peekCsr(csr, val, name))
+      if (hart.peekCsr(csr, val, name))
 	{
 	  std::ostringstream oss;
 	  oss << name << "(0x" << std::hex << i << "):"  << std::dec;
@@ -213,7 +221,7 @@ peekAllCsrs(Core<URV>& core)
 		    << (boost::format(hexForm) % val);
 
 	  URV reset = 0, writeMask = 0, pokeMask = 0;
-	  if (core.peekCsr(csr, val, reset, writeMask, pokeMask))
+	  if (hart.peekCsr(csr, val, reset, writeMask, pokeMask))
 	    {
 	      std::cout << ' ' << (boost::format(hexForm) % reset);
 	      std::cout << ' ' << (boost::format(hexForm) % writeMask);
@@ -228,7 +236,7 @@ peekAllCsrs(Core<URV>& core)
 template <typename URV>
 static
 void
-peekAllTriggers(Core<URV>& core)
+peekAllTriggers(Hart<URV>& hart)
 {
   auto hexForm = getHexForm<URV>(); // Format string for printing a hex val
 
@@ -248,7 +256,7 @@ peekAllTriggers(Core<URV>& core)
   // value/reset/write-mask/poke-mask
   URV tselVal = 0, tselReset, tselWm = 0, tselPm = 0;
 
-  if (core.peekCsr(CsrNumber::TSELECT, tselVal, tselReset, tselWm, tselPm))
+  if (hart.peekCsr(CsrNumber::TSELECT, tselVal, tselReset, tselWm, tselPm))
     {
       URV maxTrigger = tselWm;
       for (URV trigger = 0; trigger <= maxTrigger; ++trigger)
@@ -256,7 +264,7 @@ peekAllTriggers(Core<URV>& core)
 	  URV v1(0), v2(0), v3(0), wm1(0), wm2(0), wm3(0);
 	  URV pm1(0), pm2(0), pm3(0);
 
-	  if (core.peekTrigger(trigger, v1, v2, v3, wm1, wm2, wm3,
+	  if (hart.peekTrigger(trigger, v1, v2, v3, wm1, wm2, wm3,
 			       pm1, pm2, pm3))
 	    {
 	      std::string name = "trigger" + std::to_string(trigger) + ":";
@@ -281,7 +289,7 @@ peekAllTriggers(Core<URV>& core)
 
 template <typename URV>
 bool
-Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
+Interactive<URV>::peekCommand(Hart<URV>& hart, const std::string& line,
 			      const std::vector<std::string>& tokens)
 {
   if (tokens.size() < 2)
@@ -306,22 +314,22 @@ Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
 
   if (resource == "all")
     {
-      std::cout << "pc: " << (boost::format(hexForm) % core.peekPc()) << '\n';
+      std::cout << "pc: " << (boost::format(hexForm) % hart.peekPc()) << '\n';
       std::cout << "\n";
 
-      peekAllIntRegs(core);
+      peekAllIntRegs(hart);
       std::cout << "\n";
 
-      peekAllCsrs(core);
+      peekAllCsrs(hart);
       std::cout << "\n";
 
-      peekAllTriggers(core);
+      peekAllTriggers(hart);
       return true;
     }
 
   if (resource == "pc")
     {
-      URV pc = core.peekPc();
+      URV pc = hart.peekPc();
       std::cout << (boost::format(hexForm) % pc) << std::endl;
       return true;
     }
@@ -349,7 +357,7 @@ Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
       uint32_t word = 0;
       for (URV addr = addr0; addr <= addr1; addr += 4)
 	{
-	  if (not core.peekMemory(addr, word))
+	  if (not hart.peekMemory(addr, word))
 	    {
 	      std::cerr << "Memory address out of bounds: " << addrStr << '\n';
 	      return false;
@@ -364,17 +372,17 @@ Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
     {
       if (addrStr == "all")
 	{
-	  peekAllIntRegs(core);
+	  peekAllIntRegs(hart);
 	  return true;
 	}
 
       unsigned intReg = 0;
-      if (not core.findIntReg(addrStr, intReg))
+      if (not hart.findIntReg(addrStr, intReg))
 	{
 	  std::cerr << "No such integer register: " << addrStr << '\n';
 	  return false;
 	}
-      if (core.peekIntReg(intReg, val))
+      if (hart.peekIntReg(intReg, val))
 	{
 	  std::cout << (boost::format(hexForm) % val) << std::endl;
 	  return true;
@@ -385,7 +393,7 @@ Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
 
   if (resource == "f")
     {
-      if (not core.isRvf())
+      if (not hart.isRvf())
 	{
 	  std::cerr << "Floating point extension is no enabled\n";
 	  return false;
@@ -393,18 +401,18 @@ Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
 
       if (addrStr == "all")
 	{
-	  peekAllFpRegs(core);
+	  peekAllFpRegs(hart);
 	  return true;
 	}
 
       unsigned fpReg = 0;
-      if (not core.findFpReg(addrStr, fpReg))
+      if (not hart.findFpReg(addrStr, fpReg))
 	{
 	  std::cerr << "No such integer register: " << addrStr << '\n';
 	  return false;
 	}
       uint64_t fpVal = 0;
-      if (core.peekFpReg(fpReg, fpVal))
+      if (hart.peekFpReg(fpReg, fpVal))
 	{
 	  std::cout << (boost::format("0x%016x") % fpVal) << std::endl;
 	  return true;
@@ -417,17 +425,17 @@ Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
     {
       if (addrStr == "all")
 	{
-	  peekAllCsrs(core);
+	  peekAllCsrs(hart);
 	  return true;
 	}
 
-      auto csr = core.findCsr(addrStr);
+      auto csr = hart.findCsr(addrStr);
       if (not csr)
 	{
 	  std::cerr << "No such CSR: " << addrStr << '\n';
 	  return false;
 	}
-      if (core.peekCsr(csr->getNumber(), val))
+      if (hart.peekCsr(csr->getNumber(), val))
 	{
 	  std::cout << (boost::format(hexForm) % val) << std::endl;
 	  return true;
@@ -440,7 +448,7 @@ Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
     {
       if (addrStr == "all")
 	{
-	  peekAllTriggers(core);
+	  peekAllTriggers(hart);
 	  return true;
 	}
 
@@ -448,7 +456,7 @@ Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
       if (not parseCmdLineNumber("trigger-number", addrStr, trigger))
 	return false;
       URV v1(0), v2(0), v3(0);
-      if (core.peekTrigger(trigger, v1, v2, v3))
+      if (hart.peekTrigger(trigger, v1, v2, v3))
 	{
 	  std::cout << (boost::format(hexForm) % v1) << ' '
 		    << (boost::format(hexForm) % v2) << ' '
@@ -467,7 +475,7 @@ Interactive<URV>::peekCommand(Core<URV>& core, const std::string& line,
 
 template <typename URV>
 bool
-Interactive<URV>::pokeCommand(Core<URV>& core, const std::string& line,
+Interactive<URV>::pokeCommand(Hart<URV>& hart, const std::string& line,
 			      const std::vector<std::string>& tokens)
 {
   if (tokens.size() < 3)
@@ -487,7 +495,7 @@ Interactive<URV>::pokeCommand(Core<URV>& core, const std::string& line,
     {
       if (not parseCmdLineNumber("pc", tokens.at(2), value))
 	return false;
-      core.pokePc(value);
+      hart.pokePc(value);
       return true;
     }
 
@@ -510,9 +518,9 @@ Interactive<URV>::pokeCommand(Core<URV>& core, const std::string& line,
   if (resource == "r")
     {
       unsigned intReg = 0;
-      if (core.findIntReg(addrStr, intReg))
+      if (hart.findIntReg(addrStr, intReg))
 	{
-	  if (core.pokeIntReg(intReg, value))
+	  if (hart.pokeIntReg(intReg, value))
 	    return true;
 	  std::cerr << "Failed to write integer register " << addrStr << '\n';
 	  return false;
@@ -525,9 +533,9 @@ Interactive<URV>::pokeCommand(Core<URV>& core, const std::string& line,
   if (resource == "f")
     {
       unsigned fpReg = 0;
-      if (core.findFpReg(addrStr, fpReg))
+      if (hart.findFpReg(addrStr, fpReg))
 	{
-	  if (core.pokeFpReg(fpReg, value))
+	  if (hart.pokeFpReg(fpReg, value))
 	    return true;
 	  std::cerr << "Failed to write FP register " << addrStr << '\n';
 	  return false;
@@ -539,10 +547,10 @@ Interactive<URV>::pokeCommand(Core<URV>& core, const std::string& line,
 
   if (resource == "c")
     {
-      auto csr = core.findCsr(addrStr);
+      auto csr = hart.findCsr(addrStr);
       if (csr)
 	{
-	  if (core.pokeCsr(csr->getNumber(), value))
+	  if (hart.pokeCsr(csr->getNumber(), value))
 	    return true;
 	  std::cerr << "Failed to write CSR " << addrStr << '\n';
 	  return false;
@@ -563,7 +571,7 @@ Interactive<URV>::pokeCommand(Core<URV>& core, const std::string& line,
 	return false;
       if (not parseCmdLineNumber("value3", tokens.at(5), v3))
 	return false;
-      if (core.pokeTrigger(trigger, v1, v2, v3))
+      if (hart.pokeTrigger(trigger, v1, v2, v3))
 	return true;
       std::cerr << "Trigger out of bounds: " << addrStr << '\n';
       return false;
@@ -574,7 +582,7 @@ Interactive<URV>::pokeCommand(Core<URV>& core, const std::string& line,
       URV addr = 0;
       if (not parseCmdLineNumber("address", addrStr, addr))
 	return false;
-      if (core.pokeMemory(addr, value))
+      if (hart.pokeMemory(addr, value))
 	return true;
       std::cerr << "Address out of bounds: " << addrStr << '\n';
       return false;
@@ -588,7 +596,7 @@ Interactive<URV>::pokeCommand(Core<URV>& core, const std::string& line,
 
 template <typename URV>
 bool
-Interactive<URV>::disassCommand(Core<URV>& core, const std::string& line,
+Interactive<URV>::disassCommand(Hart<URV>& hart, const std::string& line,
 				const std::vector<std::string>& tokens)
 {
   if (tokens.size() >= 2 and tokens.at(1) == "opcode")
@@ -599,7 +607,7 @@ Interactive<URV>::disassCommand(Core<URV>& core, const std::string& line,
 	  if (not parseCmdLineNumber("opcode", tokens[i], code))
 	    return false;
 	  std::string str;
-	  core.disassembleInst(code, str);
+	  hart.disassembleInst(code, str);
 	  std::cout << "  " << tokens[i] << ":  " << str << '\n';
 	}
       return true;
@@ -613,7 +621,7 @@ Interactive<URV>::disassCommand(Core<URV>& core, const std::string& line,
       std::string item = tokens.at(2);
       std::string name;  // item (if a symbol) or function name containing item
       ElfSymbol symbol;
-      if (core.findElfSymbol(item, symbol))
+      if (hart.findElfSymbol(item, symbol))
 	name = item;
       else
 	{
@@ -623,7 +631,7 @@ Interactive<URV>::disassCommand(Core<URV>& core, const std::string& line,
 	    return false;
 
 	  // Find function containing address.
-	  core.findElfFunction(addr, name, symbol);
+	  hart.findElfFunction(addr, name, symbol);
 	}
 
       if (name.empty())
@@ -639,7 +647,7 @@ Interactive<URV>::disassCommand(Core<URV>& core, const std::string& line,
       for (size_t addr = start; addr < end; )
 	{
 	  uint32_t inst = 0;
-	  if (not core.peekMemory(addr, inst))
+	  if (not hart.peekMemory(addr, inst))
 	    {
 	      std::cerr << "Address out of bounds: 0x" << std::hex << addr
 			<< '\n' << std::dec;
@@ -651,7 +659,7 @@ Interactive<URV>::disassCommand(Core<URV>& core, const std::string& line,
 	    inst = (inst << 16) >> 16; // Clear top 16 bits.
 
 	  std::string str;
-	  core.disassembleInst(inst, str);
+	  hart.disassembleInst(inst, str);
 	  std::cout << "  " << (boost::format(hexForm) % addr) << ' '
 		    << (boost::format(hexForm) % inst) << ' ' << str << '\n';
 
@@ -680,7 +688,7 @@ Interactive<URV>::disassCommand(Core<URV>& core, const std::string& line,
   for (URV addr = addr1; addr <= addr2; )
     {
       uint32_t inst = 0;
-      if (not core.peekMemory(addr, inst))
+      if (not hart.peekMemory(addr, inst))
 	{
 	  std::cerr << "Address out of bounds: 0x" << std::hex << addr
 		    << '\n' << std::dec;
@@ -692,7 +700,7 @@ Interactive<URV>::disassCommand(Core<URV>& core, const std::string& line,
 	inst = (inst << 16) >> 16; // Clear top 16 bits.
 
       std::string str;
-      core.disassembleInst(inst, str);
+      hart.disassembleInst(inst, str);
       std::cout << (boost::format(hexForm) % addr) << ' '
 		<< (boost::format(hexForm) % inst) << ' '
 		<< str << '\n';
@@ -706,7 +714,7 @@ Interactive<URV>::disassCommand(Core<URV>& core, const std::string& line,
 
 template <typename URV>
 bool
-Interactive<URV>::elfCommand(Core<URV>& core, const std::string& line,
+Interactive<URV>::elfCommand(Hart<URV>& hart, const std::string& line,
 			     const std::vector<std::string>& tokens)
 {
   if (tokens.size() != 2)
@@ -718,30 +726,12 @@ Interactive<URV>::elfCommand(Core<URV>& core, const std::string& line,
 
   std::string filePath = tokens.at(1);
 
-  size_t entryPoint = 0, exitPoint = 0;
+  size_t entryPoint = 0;
 
-  if (not core.loadElfFile(filePath, entryPoint, exitPoint))
+  if (not hart.loadElfFile(filePath, entryPoint))
     return false;
 
-  core.pokePc(URV(entryPoint));
-
-  if (exitPoint)
-    core.setStopAddress(URV(exitPoint));
-
-  ElfSymbol sym;
-  if (core.findElfSymbol("tohost", sym))
-    core.setToHostAddress(sym.addr_);
-
-  if (core.findElfSymbol("__whisper_console_io", sym))
-    core.setConsoleIo(URV(sym.addr_));
-
-  if (core.findElfSymbol("__global_pointer$", sym))
-    core.pokeIntReg(RegGp, URV(sym.addr_));
-
-  if (core.findElfSymbol("_end", sym))   // For newlib emulation.
-    core.setTargetProgramBreak(URV(sym.addr_));
-  else
-    core.setTargetProgramBreak(URV(exitPoint));
+  hart.pokePc(URV(entryPoint));
 
   return true;
 }
@@ -749,7 +739,7 @@ Interactive<URV>::elfCommand(Core<URV>& core, const std::string& line,
 
 template <typename URV>
 bool
-Interactive<URV>::hexCommand(Core<URV>& core, const std::string& line,
+Interactive<URV>::hexCommand(Hart<URV>& hart, const std::string& line,
 			     const std::vector<std::string>& tokens)
 {
   if (tokens.size() != 2)
@@ -761,7 +751,7 @@ Interactive<URV>::hexCommand(Core<URV>& core, const std::string& line,
 
   std::string fileName = tokens.at(1);
 
-  if (not core.loadHexFile(fileName))
+  if (not hart.loadHexFile(fileName))
     return false;
 
   return true;
@@ -770,12 +760,12 @@ Interactive<URV>::hexCommand(Core<URV>& core, const std::string& line,
 
 template <typename URV>
 bool
-Interactive<URV>::resetCommand(Core<URV>& core, const std::string& /*line*/,
+Interactive<URV>::resetCommand(Hart<URV>& hart, const std::string& /*line*/,
 			       const std::vector<std::string>& tokens)
 {
   if (tokens.size() == 1)
     {
-      core.reset(resetMemoryMappedRegs_);
+      hart.reset(resetMemoryMappedRegs_);
       return true;
     }
 
@@ -785,8 +775,8 @@ Interactive<URV>::resetCommand(Core<URV>& core, const std::string& /*line*/,
       if (not parseCmdLineNumber("reset-pc", tokens[1], resetPc))
 	return false;
 
-      core.defineResetPc(resetPc);
-      core.reset(resetMemoryMappedRegs_);
+      hart.defineResetPc(resetPc);
+      hart.reset(resetMemoryMappedRegs_);
       return true;
     }
 
@@ -824,11 +814,12 @@ Interactive<URV>::replayFileCommand(const std::string& line,
 
 template <typename URV>
 bool
-Interactive<URV>::exceptionCommand(Core<URV>& core, const std::string& line,
+Interactive<URV>::exceptionCommand(Hart<URV>& hart, const std::string& line,
 				   const std::vector<std::string>& tokens)
 {
-  bool bad = false;
+  using std::cerr;
 
+  bool bad = false;
   URV addr = 0;
 
   if (tokens.size() < 2)
@@ -839,11 +830,11 @@ Interactive<URV>::exceptionCommand(Core<URV>& core, const std::string& line,
       if (tag == "inst")
 	{
 	  if (tokens.size() == 2)
-	    core.postInstAccessFault(0);
+	    hart.postInstAccessFault(0);
 	  else if (tokens.size() == 3)
 	    {
 	      if (parseCmdLineNumber("exception inst offset", tokens.at(2), addr))
-		core.postInstAccessFault(addr);
+		hart.postInstAccessFault(addr);
 	      else
 		bad = true;
 	    }
@@ -854,11 +845,11 @@ Interactive<URV>::exceptionCommand(Core<URV>& core, const std::string& line,
       else if (tag == "data")
 	{
 	  if (tokens.size() == 2)
-	    core.postDataAccessFault(0);
+	    hart.postDataAccessFault(0);
 	  else if (tokens.size() == 3)
 	    {
 	      if (parseCmdLineNumber("exception data offset", tokens.at(2), addr))
-		core.postDataAccessFault(addr);
+		hart.postDataAccessFault(addr);
 	      else
 		bad = true;
 	    }
@@ -874,39 +865,56 @@ Interactive<URV>::exceptionCommand(Core<URV>& core, const std::string& line,
 	      bad = not parseCmdLineNumber("exception store address",
 					   tokens.at(2), addr);
 	      if (not bad)
-		{
-		  unsigned matchCount = 0;
-		  if (core.applyStoreException(addr, matchCount))
-		    return true;
-		  std::cerr << "Invalid exception store command: " << line << '\n';
-		  if (matchCount == 0)
-		    std::cerr << "  No pending store or invalid address\n";
-		  else
-		    std::cerr << "  Multiple matching addresses (unsupported)\n";
-		  return false;
-		}
-	    }
-	}
+                {
+                  unsigned errors = 0;
+                  for (auto cr : harts_)
+                    if (cr->isNmiEnabled())
+                      {
+                        unsigned matches = 0;
+                        if (not cr->applyStoreException(addr, matches))
+                          {
+                            cerr << "Invalid exception store command: " << line << '\n';
+                            if (matches == 0)
+                              cerr << "  No pending store or invalid address\n";
+                            else
+                              cerr << "  Multiple matching addresses (unsupported)\n";
+                            errors++;
+                          }
+                      }
+                  return errors == 0;
+                }
+            }
+        }
 
       else if (tag == "load")
 	{
-	  bad = tokens.size() != 3;
+	  bad = tokens.size() != 4;
 	  if (not bad)
 	    {
 	      bad = not parseCmdLineNumber("exception load address",
 					   tokens.at(2), addr);
+	      unsigned tag = 0;
+	      bad = bad or not parseCmdLineNumber("exception load tag",
+						  tokens.at(3), tag);
 	      if (not bad)
-		{
-		  unsigned matchCount = 0;
-		  if (core.applyLoadException(addr, matchCount))
-		    return true;
-		  std::cerr << "Invalid exception load command: " << line << '\n';
-		  if (matchCount == 0)
-		    std::cerr << "  No pending load or invalid address\n";
-		  else
-		    std::cerr << "  Multiple matching addresses (unsupported)\n";
-		  return false;
-		}
+                {
+                  unsigned errors = 0;
+                  for (auto cr : harts_)
+                    if (cr->isNmiEnabled())
+                      {
+                        unsigned matches = 0;
+                        if (not cr->applyLoadException(addr, tag, matches))
+                          {
+                            cerr << "Invalid exception load command: " << line << '\n';
+                            if (matches == 0)
+                              cerr << "  No pending load or invalid address/tag\n";
+                            else
+                              cerr << "  Multiple matching tags\n";
+                            errors++;
+                          }
+                      }
+                  return errors == 0;
+                }
 	    }
 	}
 
@@ -917,10 +925,9 @@ Interactive<URV>::exceptionCommand(Core<URV>& core, const std::string& line,
 	    {
 	      bad = not parseCmdLineNumber("nmi", tokens.at(2), addr);
 	      if (not bad)
-		{
-		  core.setPendingNmi(NmiCause(addr));
-		  return true;
-		}
+                for (auto cr : harts_)
+                  if (cr->isNmiEnabled())
+                    hart.setPendingNmi(NmiCause(addr));
 	    }
 	}
 
@@ -949,7 +956,7 @@ Interactive<URV>::exceptionCommand(Core<URV>& core, const std::string& line,
       std::cerr << "Invalid exception command: " << line << '\n';
       std::cerr << "  Expecting: exception inst [<offset>]\n";
       std::cerr << "   or:       exception data [<offset>]\n";
-      std::cerr << "   or:       exception load <address>\n";
+      std::cerr << "   or:       exception load <address> <tag>\n";
       std::cerr << "   or:       exception store <address>\n";
       std::cerr << "   or:       exception nmi <cause>\n";
       return false;
@@ -961,13 +968,13 @@ Interactive<URV>::exceptionCommand(Core<URV>& core, const std::string& line,
 
 template <typename URV>
 bool
-Interactive<URV>::loadFinishedCommand(Core<URV>& core, const std::string& line,
+Interactive<URV>::loadFinishedCommand(Hart<URV>& hart, const std::string& line,
 				      const std::vector<std::string>& tokens)
 {
-  if (tokens.size() < 2 or tokens.size() > 3)
+  if (tokens.size() != 3)
     {
       std::cerr << "Invalid load_finished command: " << line << '\n';
-      std::cerr << "  Expecting: load_finished address [flag]\n";
+      std::cerr << "  Expecting: load_finished address tag\n";
       return false;
     }
 
@@ -975,13 +982,12 @@ Interactive<URV>::loadFinishedCommand(Core<URV>& core, const std::string& line,
   if (not parseCmdLineNumber("address", tokens.at(1), addr))
     return false;
 
-  unsigned matchOldest = true;
-  if (tokens.size() == 3)
-    if (not parseCmdLineNumber("flag", tokens.at(2), matchOldest))
+  unsigned tag = 0;
+  if (not parseCmdLineNumber("tag", tokens.at(2), tag))
       return false;
 
-  unsigned matches = 0;
-  core.applyLoadFinished(addr, matchOldest, matches);
+  unsigned matchCount = 0;
+  hart.applyLoadFinished(addr, tag, matchCount);
 
   return true;
 }
@@ -1079,8 +1085,15 @@ printInteractiveHelp()
   cout << "reset [<reset_pc>]\n";
   cout << "  Reset hart.  If reset_pc is given, then change the reset program\n";
   cout << "  counter to the given reset_pc before resetting the hart.\n\n";
-  cout << " symbols\n";
+  cout << "symbols\n";
   cout << "  List all the symbols in the loaded ELF file(s).\n\n";
+  cout << "exception inst [<offset>]\n";
+  cout << "  Take an instruction access fault on the subsequent step command. Given\n";
+  cout << "  offset (defaults to zero) is added to the instruction PC to form the address\n";
+  cout << "  responsible for the fault (that address is placed in the mtval CSR).\n\n";
+  cout << "exception data [<offset>]\n";
+  cout << "  Take a data access fault on the subsequent load/store instruction executed\n";
+  cout << "  by a step command. The offset value is currently not used.\n\n";
   cout << "quit\n";
   cout << "  Terminate the simulator\n\n";
 }
@@ -1277,22 +1290,24 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
       outLine = std::string("hart=") + std::to_string(hartId) + " " + line;
     }
 
-  if (hartId >= cores_.size())
+  if (hartId >= harts_.size())
     {
       std::cerr << "Hart id out of bounds: " << hartId << '\n';
       return false;
     }
 
-  Core<URV>& core = *(cores_.at(hartId));
+  Hart<URV>& hart = *(harts_.at(hartId));
 
   const std::string& command = tokens.front();
 
-  if (command != "reset")
+  // After the first step/run/until command, a reset command will reset
+  // the memory mapped registers.
+  if (command == "step" or command == "run" or command == "until")
     resetMemoryMappedRegs_ = true;
 
   if (command == "run")
     {
-      bool success = core.run(traceFile);
+      bool success = hart.run(traceFile);
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
       return success;
@@ -1300,7 +1315,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "u" or command == "until")
     {
-      if (not untilCommand(core, line, tokens, traceFile))
+      if (not untilCommand(hart, line, tokens, traceFile))
 	return false;
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1309,12 +1324,12 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "s" or command == "step")
     {
-      if (core.inDebugMode() and not core.inDebugStepMode())
+      if (hart.inDebugMode() and not hart.inDebugStepMode())
 	{
 	  std::cerr << "Error: Single step while in debug-halt mode\n";
 	  return false;
 	}
-      if (not stepCommand(core, line, tokens, traceFile))
+      if (not stepCommand(hart, line, tokens, traceFile))
 	return false;
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1323,7 +1338,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "peek")
     {
-      if (not peekCommand(core, line, tokens))
+      if (not peekCommand(hart, line, tokens))
 	return false;
        if (commandLog)
 	 fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1332,7 +1347,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "poke")
     {
-      if (not pokeCommand(core, line, tokens))
+      if (not pokeCommand(hart, line, tokens))
 	return false;
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1341,7 +1356,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "d" or command == "disas")
     {
-      if (not disassCommand(core, line, tokens))
+      if (not disassCommand(hart, line, tokens))
 	return false;
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1350,7 +1365,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "elf")
     {
-      if (not elfCommand(core, line, tokens))
+      if (not elfCommand(hart, line, tokens))
 	return false;
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1359,7 +1374,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "hex")
     {
-      if (not hexCommand(core, line, tokens))
+      if (not hexCommand(hart, line, tokens))
 	return false;
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1376,7 +1391,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "reset")
     {
-      if (not resetCommand(core, line, tokens))
+      if (not resetCommand(hart, line, tokens))
 	return false;
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1385,7 +1400,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "exception")
     {
-      if (not exceptionCommand(core, line, tokens))
+      if (not exceptionCommand(hart, line, tokens))
 	return false;
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1394,7 +1409,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "enter_debug")
     {
-      core.enterDebugMode(core.peekPc());
+      hart.enterDebugMode(hart.peekPc());
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
       return true;
@@ -1402,7 +1417,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "exit_debug")
     {
-      core.exitDebugMode();
+      hart.exitDebugMode();
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
       return true;
@@ -1410,7 +1425,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "load_finished")
     {
-      if (not loadFinishedCommand(core, line, tokens))
+      if (not loadFinishedCommand(hart, line, tokens))
 	return false;
       if (commandLog)
 	fprintf(commandLog, "%s\n", outLine.c_str());
@@ -1439,7 +1454,7 @@ Interactive<URV>::executeLine(unsigned& currentHartId,
 
   if (command == "symbols")
     {
-      core.printElfSymbols(std::cout);
+      hart.printElfSymbols(std::cout);
       return true;
     }
 

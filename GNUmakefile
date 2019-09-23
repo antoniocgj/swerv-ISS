@@ -65,7 +65,7 @@ OFLAGS := -O3 -Wno-c++11-narrowing  -fno-builtin -D__EMSCRIPTEN__ -DDISABLE_EXCE
 IFLAGS := $(addprefix -I,$(BOOST_INC)) -I.
 
 # Command to compile .cpp files.
-override CXXFLAGS += -MMD -MP -std=c++17 $(OFLAGS) $(IFLAGS) -pedantic -Wall -Wextra
+override CXXFLAGS += -MMD -MP -mfma -std=c++17 $(OFLAGS) $(IFLAGS) -pedantic -Wall -Wextra
 # Command to compile .c files
 override CFLAGS += -MMD -MP $(OFLAGS) $(IFLAGS) -pedantic -Wall -Wextra
 
@@ -86,16 +86,16 @@ $(BUILD_DIR)/$(PROJECT): $(BUILD_DIR)/whisper.cpp.o \
 
 # List of all CPP sources needed for librvcore.a
 RVCORE_SRCS := IntRegs.cpp CsRegs.cpp FpRegs.cpp instforms.cpp \
-            Memory.cpp Core.cpp InstEntry.cpp Triggers.cpp \
-            PerfRegs.cpp gdb.cpp CoreConfig.cpp \
+            Memory.cpp Hart.cpp InstEntry.cpp Triggers.cpp \
+            PerfRegs.cpp gdb.cpp HartConfig.cpp \
             Server.cpp Interactive.cpp decode.cpp disas.cpp \
-	    newlib.cpp DecodedInst.cpp
+	    emulateSyscall.cpp DecodedInst.cpp
 
 # List of All CPP Sources for the project
 SRCS_CXX += $(RVCORE_SRCS) whisper.cpp
 
 # List of All C Sources for the project
-SRCS_C := linenoise.c
+SRCS_C :=
 
 # List of all object files for the project
 OBJS_GEN := $(SRCS_CXX:%=$(BUILD_DIR)/%.o) $(SRCS_C:%=$(BUILD_DIR)/%.o)

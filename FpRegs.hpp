@@ -145,7 +145,7 @@ namespace WdRiscv
 
 
   template <typename URV>
-  class Core;
+  class Hart;
 
   /// Model a RISCV floating point register file.
   /// FRV (floating point register value) is the register value type. For
@@ -156,8 +156,8 @@ namespace WdRiscv
   {
   public:
 
-    friend class Core<uint32_t>;
-    friend class Core<uint64_t>;
+    friend class Hart<uint32_t>;
+    friend class Hart<uint64_t>;
 
     /// Constructor: Define a register file with the given number of
     /// registers. Each register is of type FRV. All registers
@@ -172,7 +172,9 @@ namespace WdRiscv
     FRV read(unsigned i) const
     { return regs_[i]; }
 
-    /// Return the bit pattern of the ith register as an unsigned integer.
+    /// Return the bit pattern of the ith register as an unsigned
+    /// integer. If the register contains a nan-boxed value, return
+    /// that value without the box.
     uint64_t readBits(unsigned i) const
     {
       if (sizeof(FRV) == 4)
@@ -183,6 +185,16 @@ namespace WdRiscv
       if (words[1] == ~uint32_t(0))
 	return words[0];
 
+      return *((uint64_t*) &regs_.at(i));
+    }
+
+    /// Return the bit pattern of the ith register as an unsigned
+    /// integer. If the register contains a nan-boxed value, do not
+    /// unbox it (return the 64-bit NaN).
+    uint64_t readBitsRaw(unsigned i) const
+    {
+      if (sizeof(FRV) == 4)
+	return *((uint32_t*) &regs_.at(i));
       return *((uint64_t*) &regs_.at(i));
     }
 

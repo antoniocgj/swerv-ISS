@@ -1,4 +1,4 @@
-//
+ //
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2018 Western Digital Corporation or its affiliates.
 // 
@@ -35,21 +35,21 @@
   typedef boost::multiprecision::uint128_t Uint128;
 #endif
 
-#include <string.h>
-#include <time.h>
+#include <cstring>
+#include <ctime>
 #include <fcntl.h>
 #include <sys/time.h>
 #include <sys/stat.h>
 
-#include <assert.h>
-#include <signal.h>
+#include <cassert>
+#include <csignal>
 
 #define __STDC_FORMAT_MACROS
-#include <inttypes.h>
+#include <cinttypes>
 
 #include "instforms.hpp"
 #include "DecodedInst.hpp"
-#include "Core.hpp"
+#include "Hart.hpp"
 
 using namespace WdRiscv;
 
@@ -80,12 +80,44 @@ parseNumber(const std::string& numberStr, TYPE& number)
 }
 
 
+/// Unsigned-float union: reinterpret bits as uint32_t or float
+union Uint32FloatUnion
+{
+  Uint32FloatUnion(uint32_t u) : u(u)
+  { }
+
+  Uint32FloatUnion(float f) : f(f)
+  { }
+
+  uint32_t u = 0;
+  float f;
+};
+
+
+/// Unsigned-float union: reinterpret bits as uint64_t or double
+union Uint64DoubleUnion
+{
+  Uint64DoubleUnion(uint32_t u) : u(u)
+  { }
+
+  Uint64DoubleUnion(double d) : d(d)
+  { }
+
+  uint64_t u = 0;
+  double d;
+};
+
+
+
 template <typename URV>
-Core<URV>::Core(unsigned hartId, Memory& memory, unsigned intRegCount)
-  : hartId_(hartId), memory_(memory), intRegs_(intRegCount), fpRegs_(32)
+Hart<URV>::Hart(unsigned localHartId, Memory& memory, unsigned intRegCount)
+  : localHartId_(localHartId), memory_(memory), intRegs_(intRegCount),
+    fpRegs_(32)
 {
   regionHasLocalMem_.resize(16);
   regionHasLocalDataMem_.resize(16);
+  regionHasDccm_.resize(16);
+  regionHasMemMappedRegs_.resize(16);
   regionHasLocalInstMem_.resize(16);
 
   decodeCacheSize_ = 64*1024;
@@ -93,7 +125,7 @@ Core<URV>::Core(unsigned hartId, Memory& memory, unsigned intRegCount)
   decodeCache_.resize(decodeCacheSize_);
 
   // Tie the retired instruction and cycle counter CSRs to variables
-  // held in the core.
+  // held in the hart.
   if constexpr (sizeof(URV) == 4)
     {
       URV* low = reinterpret_cast<URV*> (&retiredInsts_);
@@ -120,19 +152,25 @@ Core<URV>::Core(unsigned hartId, Memory& memory, unsigned intRegCount)
       csRegs_.regs_.at(size_t(CsrNumber::MCYCLE)).tie(&cycleCount_);
     }
 
-  csRegs_.configCsr(CsrNumber::MHARTID, true, hartId, 0, 0, false);
+  // Add local hart-id to the base-hart-id defined in the configuration file.
+  bool implemented = true, debug = false, shared = false;
+  URV base = 0;
+  csRegs_.peek(CsrNumber::MHARTID, base);
+  URV hartId = base + localHartId;
+  csRegs_.configCsr(CsrNumber::MHARTID, implemented, hartId, 0, 0, debug,
+                    shared);
 }
 
 
 template <typename URV>
-Core<URV>::~Core()
+Hart<URV>::~Hart()
 {
 }
 
 
 template <typename URV>
 void
-Core<URV>::getImplementedCsrs(std::vector<CsrNumber>& vec) const
+Hart<URV>::getImplementedCsrs(std::vector<CsrNumber>& vec) const
 {
   vec.clear();
 
@@ -147,7 +185,7 @@ Core<URV>::getImplementedCsrs(std::vector<CsrNumber>& vec) const
 
 template <typename URV>
 void
-Core<URV>::reset(bool resetMemoryMappedRegs)
+Hart<URV>::reset(bool resetMemoryMappedRegs)
 {
   intRegs_.reset();
   csRegs_.reset();
@@ -161,7 +199,6 @@ Core<URV>::reset(bool resetMemoryMappedRegs)
   clearTraceData();
   clearPendingNmi();
 
-  storeQueue_.clear();
   loadQueue_.clear();
 
   pc_ = resetPc_;
@@ -185,16 +222,16 @@ Core<URV>::reset(bool resetMemoryMappedRegs)
         {
           rvf_ = true;
 
-          bool isDebug = false;
+	  bool isDebug = false, shared = true;
 
-          // Make sure FCSR/FRM/FFLAGS are enabled if F extension is on.
-          if (not csRegs_.getImplementedCsr(CsrNumber::FCSR))
-            csRegs_.configCsr("fcsr", true, 0, 0xff, 0xff, isDebug);
-          if (not csRegs_.getImplementedCsr(CsrNumber::FRM))
-            csRegs_.configCsr("frm", true, 0, 0x7, 0x7, isDebug);
-          if (not csRegs_.getImplementedCsr(CsrNumber::FFLAGS))
-            csRegs_.configCsr("fflags", true, 0, 0x1f, 0x1f, isDebug);
-        }
+	  // Make sure FCSR/FRM/FFLAGS are enabled if F extension is on.
+	  if (not csRegs_.getImplementedCsr(CsrNumber::FCSR))
+	    csRegs_.configCsr("fcsr", true, 0, 0xff, 0xff, isDebug, shared);
+	  if (not csRegs_.getImplementedCsr(CsrNumber::FRM))
+	    csRegs_.configCsr("frm", true, 0, 0x7, 0x7, isDebug, shared);
+	  if (not csRegs_.getImplementedCsr(CsrNumber::FFLAGS))
+	    csRegs_.configCsr("fflags", true, 0, 0x1f, 0x1f, isDebug, shared);
+	}
 
       if (value & (URV(1) << ('d' - 'a')))  // Double precision FP.
         {
@@ -251,12 +288,26 @@ Core<URV>::reset(bool resetMemoryMappedRegs)
 
   updateStackChecker();  // Swerv-specific feature.
   enableWideLdStMode(false);  // Swerv-specific feature.
+
+  hartStarted_ = true;
+
+  // If mhartstart exists then use its bits to decide which hart has
+  // started.
+  if (localHartId_ != 0)
+    {
+      auto csr = findCsr("mhartstart");
+      if (csr)
+        {
+          URV value = csr->read();
+          hartStarted_ = ((URV(1) << localHartId_) & value) != 0;
+        }
+    }
 }
 
 
 template <typename URV>
 bool
-Core<URV>::loadHexFile(const std::string& file)
+Hart<URV>::loadHexFile(const std::string& file)
 {
   return memory_.loadHexFile(file);
 }
@@ -264,24 +315,39 @@ Core<URV>::loadHexFile(const std::string& file)
 
 template <typename URV>
 bool
-Core<URV>::loadElfFile(const std::string& file, size_t& entryPoint,
-                       size_t& exitPoint)
+Hart<URV>::loadElfFile(const std::string& file, size_t& entryPoint)
 {
-  return memory_.loadElfFile(file, entryPoint, exitPoint);
+  unsigned registerWidth = sizeof(URV)*8;
+
+  size_t end = 0;
+  if (not memory_.loadElfFile(file, registerWidth, entryPoint, end))
+    return false;
+
+  this->pokePc(URV(entryPoint));
+
+  ElfSymbol sym;
+
+  if (this->findElfSymbol(toHostSym_, sym))
+    this->setToHostAddress(sym.addr_);
+
+  if (this->findElfSymbol("__whisper_console_io", sym))
+    this->setConsoleIo(URV(sym.addr_));
+
+  if (this->findElfSymbol("__global_pointer$", sym))
+    this->pokeIntReg(RegGp, URV(sym.addr_));
+
+  if (this->findElfSymbol("_end", sym))   // For newlib/linux emulation.
+    this->setTargetProgramBreak(URV(sym.addr_));
+  else
+    this->setTargetProgramBreak(URV(end));
+
+  return true;
 }
 
 
 template <typename URV>
 bool
-Core<URV>::peekMemory(size_t address, uint8_t& val) const
-{
-  return memory_.readByte(address, val);
-}
-
-
-template <typename URV>
-bool
-Core<URV>::peekMemory(size_t address, uint16_t& val) const
+Hart<URV>::peekMemory(size_t address, uint16_t& val) const
 {
   if (memory_.readHalfWord(address, val))
     return true;
@@ -293,7 +359,7 @@ Core<URV>::peekMemory(size_t address, uint16_t& val) const
 
 template <typename URV>
 bool
-Core<URV>::peekMemory(size_t address, uint32_t& val) const
+Hart<URV>::peekMemory(size_t address, uint32_t& val) const
 {
   if (memory_.readWord(address, val))
     return true;
@@ -305,7 +371,7 @@ Core<URV>::peekMemory(size_t address, uint32_t& val) const
 
 template <typename URV>
 bool
-Core<URV>::peekMemory(size_t address, uint64_t& val) const
+Hart<URV>::peekMemory(size_t address, uint64_t& val) const
 {
   uint32_t high = 0, low = 0;
 
@@ -329,13 +395,11 @@ Core<URV>::peekMemory(size_t address, uint64_t& val) const
 
 template <typename URV>
 bool
-Core<URV>::pokeMemory(size_t addr, uint8_t val)
+Hart<URV>::pokeMemory(size_t addr, uint8_t val)
 {
-  if (hasLr_)
-    {
-      if (addr >= lrAddr_ and (addr - lrAddr_) < lrSize_)
-        hasLr_ = false;
-    }
+  std::lock_guard<std::mutex> lock(memory_.lrMutex_);
+
+  memory_.invalidateOtherHartLr(localHartId_, addr, sizeof(val));
 
   if (memory_.pokeByte(addr, val))
     {
@@ -349,19 +413,11 @@ Core<URV>::pokeMemory(size_t addr, uint8_t val)
 
 template <typename URV>
 bool
-Core<URV>::pokeMemory(size_t addr, uint16_t val)
+Hart<URV>::pokeMemory(size_t addr, uint16_t val)
 {
-  if (hasLr_)
-    {
-      // If poke starts at any of the reserved bytes: lose reservation.
-      if (addr >= lrAddr_ and (addr - lrAddr_) < lrSize_)
-        hasLr_ = false;
+  std::lock_guard<std::mutex> lock(memory_.lrMutex_);
 
-      // If poke starts before reserved bytes but spills into them:
-      // lose reservation.
-      if (addr < lrAddr_ and (lrAddr_ - addr) < 2)
-        hasLr_ = false;
-    }
+  memory_.invalidateOtherHartLr(localHartId_, addr, sizeof(val));
 
   if (memory_.poke(addr, val))
     {
@@ -375,23 +431,15 @@ Core<URV>::pokeMemory(size_t addr, uint16_t val)
 
 template <typename URV>
 bool
-Core<URV>::pokeMemory(size_t addr, uint32_t val)
+Hart<URV>::pokeMemory(size_t addr, uint32_t val)
 {
   // We allow poke to bypass masking for memory mapped registers
   // otherwise, there is no way for external driver to clear bits that
-  // are read-only to this core.
+  // are read-only to this hart.
 
-  if (hasLr_)
-    {
-      // If poke starts at any of the reserved bytes: lose reservation.
-      if (addr >= lrAddr_ and (addr - lrAddr_) < lrSize_)
-        hasLr_ = false;
+  std::lock_guard<std::mutex> lock(memory_.lrMutex_);
 
-      // If poke starts before reserved bytes but spills into them:
-      // lose reservation.
-      if (addr < lrAddr_ and (lrAddr_ - addr) < 4)
-        hasLr_ = false;
-    }
+  memory_.invalidateOtherHartLr(localHartId_, addr, sizeof(val));
 
   if (memory_.poke(addr, val))
     {
@@ -405,19 +453,11 @@ Core<URV>::pokeMemory(size_t addr, uint32_t val)
 
 template <typename URV>
 bool
-Core<URV>::pokeMemory(size_t addr, uint64_t val)
+Hart<URV>::pokeMemory(size_t addr, uint64_t val)
 {
-  if (hasLr_)
-    {
-      // If poke starts at any of the reserved bytes: lose reservation.
-      if (addr >= lrAddr_ and (addr - lrAddr_) < lrSize_)
-        hasLr_ = false;
+  std::lock_guard<std::mutex> lock(memory_.lrMutex_);
 
-      // If poke starts before reserved bytes but spills into them:
-      // lose reservation.
-      if (addr < lrAddr_ and (lrAddr_ - addr) < 8)
-        hasLr_ = false;
-    }
+  memory_.invalidateOtherHartLr(localHartId_, addr, sizeof(val));
 
   if (memory_.poke(addr, val))
     {
@@ -431,7 +471,7 @@ Core<URV>::pokeMemory(size_t addr, uint64_t val)
 
 template <typename URV>
 void
-Core<URV>::setPendingNmi(NmiCause cause)
+Hart<URV>::setPendingNmi(NmiCause cause)
 {
   // First nmi sets the cause. The cause is sticky.
   if (not nmiPending_)
@@ -452,7 +492,7 @@ Core<URV>::setPendingNmi(NmiCause cause)
 
 template <typename URV>
 void
-Core<URV>::clearPendingNmi()
+Hart<URV>::clearPendingNmi()
 {
   nmiPending_ = false;
   nmiCause_ = NmiCause::UNKNOWN;
@@ -469,7 +509,7 @@ Core<URV>::clearPendingNmi()
 
 template <typename URV>
 void
-Core<URV>::setToHostAddress(size_t address)
+Hart<URV>::setToHostAddress(size_t address)
 {
   toHost_ = URV(address);
   toHostValid_ = true;
@@ -478,7 +518,7 @@ Core<URV>::setToHostAddress(size_t address)
 
 template <typename URV>
 void
-Core<URV>::clearToHostAddress()
+Hart<URV>::clearToHostAddress()
 {
   toHost_ = 0;
   toHostValid_ = false;
@@ -487,28 +527,8 @@ Core<URV>::clearToHostAddress()
 
 template <typename URV>
 void
-Core<URV>::putInStoreQueue(unsigned size, size_t addr, uint64_t data,
-                           uint64_t prevData)
-{
-  if (maxStoreQueueSize_ == 0 or memory_.isLastWriteToDccm())
-    return;
-
-  if (storeQueue_.size() >= maxStoreQueueSize_)
-    {
-      for (size_t i = 1; i < maxStoreQueueSize_; ++i)
-        storeQueue_[i-1] = storeQueue_[i];
-      storeQueue_[maxStoreQueueSize_-1] = StoreInfo(size, addr, data,
-                                                    prevData);
-    }
-  else
-    storeQueue_.push_back(StoreInfo(size, addr, data, prevData));
-}
-
-
-template <typename URV>
-void
-Core<URV>::putInLoadQueue(unsigned size, size_t addr, unsigned regIx,
-                          uint64_t data)
+Hart<URV>::putInLoadQueue(unsigned size, size_t addr, unsigned regIx,
+			  uint64_t data, bool isWide)
 {
   if (not loadQueueEnabled_)
     return;
@@ -523,18 +543,21 @@ Core<URV>::putInLoadQueue(unsigned size, size_t addr, unsigned regIx,
 
   if (loadQueue_.size() >= maxLoadQueueSize_)
     {
+      std::cerr << "At #" << instCounter_ << ": Load queue full.\n";
       for (size_t i = 1; i < maxLoadQueueSize_; ++i)
-        loadQueue_[i-1] = loadQueue_[i];
-      loadQueue_[maxLoadQueueSize_-1] = LoadInfo(size, addr, regIx, data);
+	loadQueue_[i-1] = loadQueue_[i];
+      loadQueue_[maxLoadQueueSize_-1] = LoadInfo(size, addr, regIx, data,
+						 isWide, instCounter_);
     }
   else
-    loadQueue_.push_back(LoadInfo(size, addr, regIx, data));
+    loadQueue_.push_back(LoadInfo(size, addr, regIx, data, isWide,
+				  instCounter_));
 }
 
 
 template <typename URV>
 void
-Core<URV>::invalidateInLoadQueue(unsigned regIx)
+Hart<URV>::invalidateInLoadQueue(unsigned regIx)
 {
   // Replace entry containing target register with x0 so that load exception
   // matching entry will not revert target register.
@@ -546,7 +569,7 @@ Core<URV>::invalidateInLoadQueue(unsigned regIx)
 
 template <typename URV>
 void
-Core<URV>::removeFromLoadQueue(unsigned regIx)
+Hart<URV>::removeFromLoadQueue(unsigned regIx)
 {
   if (regIx == 0)
     return;
@@ -580,7 +603,7 @@ Core<URV>::removeFromLoadQueue(unsigned regIx)
 template <typename URV>
 inline
 void
-Core<URV>::execBeq(const DecodedInst* di)
+Hart<URV>::execBeq(const DecodedInst* di)
 {
   uint32_t rs1 = di->op0();
   uint32_t rs2 = di->op1();
@@ -596,7 +619,7 @@ Core<URV>::execBeq(const DecodedInst* di)
 template <typename URV>
 inline
 void
-Core<URV>::execBne(const DecodedInst* di)
+Hart<URV>::execBne(const DecodedInst* di)
 {
   if (intRegs_.read(di->op0()) == intRegs_.read(di->op1()))
     return;
@@ -609,7 +632,7 @@ Core<URV>::execBne(const DecodedInst* di)
 template <typename URV>
 inline
 void
-Core<URV>::execAddi(const DecodedInst* di)
+Hart<URV>::execAddi(const DecodedInst* di)
 {
   SRV imm = di->op2AsInt();
   SRV v = intRegs_.read(di->op1()) + imm;
@@ -620,7 +643,7 @@ Core<URV>::execAddi(const DecodedInst* di)
 template <typename URV>
 inline
 void
-Core<URV>::execAdd(const DecodedInst* di)
+Hart<URV>::execAdd(const DecodedInst* di)
 {
   URV v = intRegs_.read(di->op1()) + intRegs_.read(di->op2());
   intRegs_.write(di->op0(), v);
@@ -630,7 +653,7 @@ Core<URV>::execAdd(const DecodedInst* di)
 template <typename URV>
 inline
 void
-Core<URV>::execAndi(const DecodedInst* di)
+Hart<URV>::execAndi(const DecodedInst* di)
 {
   SRV imm = di->op2AsInt();
   URV v = intRegs_.read(di->op1()) & imm;
@@ -640,11 +663,12 @@ Core<URV>::execAndi(const DecodedInst* di)
 
 template <typename URV>
 bool
-Core<URV>::isIdempotentRegion(size_t addr) const
+Hart<URV>::isIdempotentRegion(size_t addr) const
 {
   unsigned region = unsigned(addr >> (sizeof(URV)*8 - 4));
   URV mracVal = 0;
-  if (csRegs_.read(CsrNumber::MRAC, PrivilegeMode::Machine, debugMode_, mracVal))
+  bool debugMode = false;
+  if (csRegs_.read(CsrNumber::MRAC, PrivilegeMode::Machine, debugMode, mracVal))
     {
       unsigned bit = (mracVal >> (region*2 + 1)) & 1;
       return bit == 0  or regionHasLocalMem_.at(region);
@@ -655,8 +679,11 @@ Core<URV>::isIdempotentRegion(size_t addr) const
 
 template <typename URV>
 bool
-Core<URV>::applyStoreException(URV addr, unsigned& matches)
+Hart<URV>::applyStoreException(URV addr, unsigned& matches)
 {
+  if (not isNmiEnabled())
+    return false;  // NMI should not have been delivered to this hart.
+
   bool prevLocked = csRegs_.mdseacLocked();
   if (not prevLocked)
     {
@@ -666,89 +693,18 @@ Core<URV>::applyStoreException(URV addr, unsigned& matches)
     }
   recordCsrWrite(CsrNumber::MDSEAC); // Always record change (per Ajay Nath)
 
-  if (not storeErrorRollback_)
-    {
-      matches = 1;
-      return true;
-    }
-
-  matches = 0;
-
-  for (const auto& entry : storeQueue_)
-    if (addr >= entry.addr_ and addr < entry.addr_ + entry.size_)
-      matches++;
-
-  if (matches != 1)
-    {
-      std::cerr << "Error: Store exception at 0x" << std::hex << addr << std::dec;
-      if (matches == 0)
-        std::cerr << " does not match any address in the store queue\n";
-      else
-        std::cerr << " matches " << matches << " entries"
-                  << " in the store queue\n";
-      return false;
-    }
-
-  // Undo matching item and remove it from queue (or replace with
-  // portion crossing double-word boundary). Restore previous
-  // bytes up to a double-word boundary.
-  bool hit = false; // True when address is found.
-  size_t undoBegin = addr, undoEnd = 0;
-  size_t removeIx = storeQueue_.size();
-  for (size_t ix = 0; ix < storeQueue_.size(); ++ix)
-    {
-      auto& entry = storeQueue_.at(ix);
-
-      size_t entryEnd = entry.addr_ + entry.size_;
-      if (hit)
-        {
-          // Re-play portions of subsequent (to one with exception)
-          // transactions covering undone bytes.
-          uint64_t data = entry.newData_;
-          for (size_t ba = entry.addr_; ba < entryEnd; ++ba, data >>= 8)
-            if (ba >= undoBegin and ba < undoEnd)
-              pokeMemory(ba, uint8_t(data));
-        }
-      else if (addr >= entry.addr_ and addr < entryEnd)
-        {
-          uint64_t prevData = entry.prevData_, newData = entry.newData_;
-          hit = true;
-          removeIx = ix;
-          size_t offset = addr - entry.addr_;
-          prevData >>= offset*8; newData >>= offset*8;
-          for (size_t i = offset; i < entry.size_; ++i)
-            {
-              pokeMemory(addr++, uint8_t(prevData));
-              prevData >>= 8; newData >>= 8;
-              undoEnd = addr;
-              if ((addr & 7) != 0)
-                continue;  // Keep undoing store till double word boundary
-              // Reached double word boundary: trim & keep rest of store record
-              if (i + 1 < entry.size_)
-                {
-                  entry = StoreInfo(entry.size_-i-1, addr, newData, prevData);
-                  removeIx = storeQueue_.size(); // Squash entry removal.
-                  break;
-                }
-            }
-        }
-    }
-
-  if (removeIx < storeQueue_.size())
-    {
-      for (size_t i = removeIx + 1; i < storeQueue_.size(); ++i)
-        storeQueue_.at(i-1) = storeQueue_.at(i);
-      storeQueue_.resize(storeQueue_.size() - 1);
-    }
-
+  matches = 1;
   return true;
 }
 
 
 template <typename URV>
 bool
-Core<URV>::applyLoadException(URV addr, unsigned& matches)
+Hart<URV>::applyLoadException(URV addr, unsigned tag, unsigned& matches)
 {
+  if (not isNmiEnabled())
+    return false;  // NMI should not have been delivered to this hart.
+
   bool prevLocked = csRegs_.mdseacLocked();
 
   if (not prevLocked)
@@ -776,22 +732,23 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
       if (matches and li.isValid() and targetReg == li.regIx_)
         hasYounger = true;
 
-      if (addr >= li.addr_ and addr < li.addr_ + li.size_)
-        {
-          if (li.isValid())
-            {
-              targetReg = li.regIx_;
-              matches++;
-            }
-          else
-            iMatches++;
-        }
+      if (li.tag_ == tag)
+	{
+	  if (li.isValid())
+	    {
+	      targetReg = li.regIx_;
+	      matches++;
+	    }
+	  else
+	    iMatches++;
+	}
     }
 
   matches += iMatches;
   if (matches != 1)
     {
-      std::cerr << "Error: Load exception at 0x" << std::hex << addr << std::dec;
+      std::cerr << "Error: Load exception addr:0x" << std::hex << addr << std::dec;
+      std::cerr << " tag:" << tag;
       if (matches == 0)
         std::cerr << " does not match any entry in the load queue\n";
       else
@@ -809,13 +766,12 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
   for (size_t ix = 0; ix < loadQueue_.size(); ++ix)
     {
       auto& entry = loadQueue_.at(ix);
-      size_t entryEnd = entry.addr_ + entry.size_;
-      if (addr >= entry.addr_ and addr < entryEnd)
-        {
-          removeIx = ix;
-          if (not entry.isValid())
-            continue;
-        }
+      if (entry.tag_ == tag)
+	{
+	  removeIx = ix;
+	  if (not entry.isValid())
+	    continue;
+	}
       else
         continue;
 
@@ -836,7 +792,15 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
         }
 
       if (not hasYounger)
-        pokeIntReg(entry.regIx_, prev);
+	{
+	  pokeIntReg(entry.regIx_, prev);
+	  if (entry.wide_)
+	    {
+	      auto csr = csRegs_.getImplementedCsr(CsrNumber::MDBHD);
+	      if (csr)
+		csr->poke(entry.prevData_ >> 32);
+	    }
+	}
 
       // Update prev-data of 1st younger item with same target reg.
       for (size_t ix2 = removeIx + 1; ix2 < loadQueue_.size(); ++ix2)
@@ -853,11 +817,7 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
     }
 
   if (removeIx < loadQueue_.size())
-    {
-      for (size_t i = removeIx + 1; i < loadQueue_.size(); ++i)
-        loadQueue_.at(i-1) = loadQueue_.at(i);
-      loadQueue_.resize(loadQueue_.size() - 1);
-    }
+    loadQueue_.erase(loadQueue_.begin() + removeIx);
 
   return true;
 }
@@ -865,7 +825,7 @@ Core<URV>::applyLoadException(URV addr, unsigned& matches)
 
 template <typename URV>
 bool
-Core<URV>::applyLoadFinished(URV addr, bool matchOldest, unsigned& matches)
+Hart<URV>::applyLoadFinished(URV addr, unsigned tag, unsigned& matches)
 {
   if (not loadErrorRollback_)
     {
@@ -880,19 +840,25 @@ Core<URV>::applyLoadFinished(URV addr, bool matchOldest, unsigned& matches)
   for (size_t i = 0; i < size; ++i)
     {
       const LoadInfo& li = loadQueue_.at(i);
-      if (li.addr_ == addr)
-        {
-          if (not matchOldest or not matches)
-            matchIx = i;
-          matches++;
-        }
+      if (li.tag_ == tag)
+	{
+	  if (not matches)
+	    matchIx = i;
+	  matches++;
+	}
     }
 
   if (matches == 0)
     {
-      std::cerr << "Warning: Load finished at 0x" << std::hex << addr << std::dec;
-      std::cerr << " does not match any entry in the load queue\n";
+      std::cerr << "Warning: Load finished addr:0x" << std::hex << addr << std::dec;
+      std::cerr << " tag:" << tag << " does not match any entry in the load queue\n";
       return true;
+    }
+
+  if (matches > 1)
+    {
+      std::cerr << "Warning: Load finished at 0x" << std::hex << addr << std::dec;
+      std::cerr << " matches multiple intries in the load queue\n";
     }
 
   LoadInfo& entry = loadQueue_.at(matchIx);
@@ -902,7 +868,7 @@ Core<URV>::applyLoadFinished(URV addr, bool matchOldest, unsigned& matches)
   // Identify earliest previous value of target register.
   unsigned targetReg = entry.regIx_;
   size_t prevIx = matchIx;
-  URV prev = entry.prevData_;  // Previous value of target reg.
+  uint64_t prev = entry.prevData_;  // Previous value of target reg.
   for (size_t j = 0; j < matchIx; ++j)
     {
       LoadInfo& li = loadQueue_.at(j);
@@ -923,12 +889,15 @@ Core<URV>::applyLoadFinished(URV addr, bool matchOldest, unsigned& matches)
   if (entry.isValid())
     for (size_t j = matchIx + 1; j < size; ++j)
       {
-        LoadInfo& li = loadQueue_.at(j);
-        if (li.isValid() and li.regIx_ == targetReg)
-          {
-            loadQueue_.at(j).prevData_ = prev;
-            break;
-          }
+	LoadInfo& li = loadQueue_.at(j);
+	if (li.isValid() and li.regIx_ == targetReg)
+	  {
+	    // Preserve upper 32 bits if wide (64-bit) load.
+	    if (li.wide_)
+	      prev = ((prev << 32) >> 32) | ((li.prevData_ >> 32) << 32);
+	    li.prevData_ = prev;
+	    break;
+	  }
       }
 
   // Remove matching entry from queue.
@@ -1015,7 +984,7 @@ printSignedHisto(const char* tag, const std::vector<uint64_t>& histo,
 template <typename URV>
 inline
 void
-Core<URV>::reportInstructionFrequency(FILE* file) const
+Hart<URV>::reportInstructionFrequency(FILE* file) const
 {
   struct CompareFreq
   {
@@ -1105,18 +1074,25 @@ Core<URV>::reportInstructionFrequency(FILE* file) const
 
 template <typename URV>
 bool
-Core<URV>::misalignedAccessCausesException(URV addr, unsigned accessSize) const
+Hart<URV>::misalignedAccessCausesException(URV addr, unsigned accessSize,
+					   SecondaryCause& secCause) const
 {
   size_t addr2 = addr + accessSize - 1;
 
   // Crossing region boundary causes misaligned exception.
   if (memory_.getRegionIndex(addr) != memory_.getRegionIndex(addr2))
-    return true;
+    {
+      secCause = SecondaryCause::STORE_MISAL_REGION_CROSS;
+      return true;
+    }
 
   // Misaligned access to a region with side effect causes misaligned
   // exception.
   if (not isIdempotentRegion(addr) or not isIdempotentRegion(addr2))
-    return true;
+    {
+      secCause = SecondaryCause::STORE_MISAL_IO;
+      return true;
+    }
 
   return false;
 }
@@ -1124,29 +1100,27 @@ Core<URV>::misalignedAccessCausesException(URV addr, unsigned accessSize) const
 
 template <typename URV>
 void
-Core<URV>::initiateLoadException(ExceptionCause cause, URV addr, unsigned size)
+Hart<URV>::initiateLoadException(ExceptionCause cause, URV addr,
+				 SecondaryCause secCause)
 {
-  // We get a load finished for loads with exception. Compensate.
-  if (loadQueueEnabled_ and not forceAccessFail_)
-    putInLoadQueue(size, addr, 0, 0);
-
   forceAccessFail_ = false;
-  initiateException(cause, currPc_, addr);
+  initiateException(cause, currPc_, addr, secCause);
 }
 
 
 template <typename URV>
 void
-Core<URV>::initiateStoreException(ExceptionCause cause, URV addr)
+Hart<URV>::initiateStoreException(ExceptionCause cause, URV addr,
+				  SecondaryCause secCause)
 {
   forceAccessFail_ = false;
-  initiateException(cause, currPc_, addr);
+  initiateException(cause, currPc_, addr, secCause);
 }
 
 
 template <typename URV>
 bool
-Core<URV>::effectiveAndBaseAddrMismatch(URV base, URV addr)
+Hart<URV>::effectiveAndBaseAddrMismatch(URV base, URV addr)
 {
   unsigned baseRegion = unsigned(base >> (sizeof(URV)*8 - 4));
   unsigned addrRegion = unsigned(addr >> (sizeof(URV)*8 - 4));
@@ -1161,51 +1135,61 @@ Core<URV>::effectiveAndBaseAddrMismatch(URV base, URV addr)
 
 template <typename URV>
 bool
-Core<URV>::checkStackLoad(URV addr, unsigned loadSize)
+Hart<URV>::checkStackLoad(URV addr, unsigned loadSize)
 {
   URV low = addr;
   URV high = addr + loadSize - 1;
   URV spVal = intRegs_.read(RegSp);
   bool ok = (high <= stackMax_ and low > spVal);
-  if (not ok)
-    initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, loadSize);
   return ok;
 }
 
 
 template <typename URV>
 bool
-Core<URV>::checkStackStore(URV addr, unsigned storeSize)
+Hart<URV>::checkStackStore(URV addr, unsigned storeSize)
 {
   URV low = addr;
   URV high = addr + storeSize - 1;
   bool ok = (high <= stackMax_ and low > stackMin_);
-  if (not ok)
-    initiateLoadException(ExceptionCause::STORE_ACC_FAULT, addr, storeSize);
   return ok;
 }
 
 
 template <typename URV>
 bool
-Core<URV>::wideLoad(uint32_t rd, URV addr, unsigned ldSize)
+Hart<URV>::wideLoad(uint32_t rd, URV addr, unsigned ldSize)
 {
-  if ((addr & 7) or ldSize != 4 or isAddressInDccm(addr))
+  auto secCause = SecondaryCause::LOAD_ACC_64BIT;
+  auto cause = ExceptionCause::LOAD_ACC_FAULT;
+
+  if ((addr & 7) or ldSize != 4 or not isDataAddressExternal(addr))
     {
-      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, 8);
+      initiateLoadException(cause, addr, secCause);
       return false;
     }
 
   uint32_t upper = 0, lower = 0;
   if (not memory_.read(addr + 4, upper) or not memory_.read(addr, lower))
     {
-      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, 8);
+      initiateLoadException(cause, addr, secCause);
       return false;
+    }
+
+  auto csr = csRegs_.getImplementedCsr(CsrNumber::MDBHD);
+
+  if (loadQueueEnabled_)
+    {
+      uint32_t prevLower = peekIntReg(rd);
+      uint32_t prevUpper = 0;
+      if (csr)
+	prevUpper = csr->read();
+      uint64_t prevWide = (uint64_t(prevUpper) << 32) | prevLower;
+      putInLoadQueue(8, addr, rd, prevWide, true /*isWide*/);
     }
 
   intRegs_.write(rd, lower);
 
-  auto csr = csRegs_.getImplementedCsr(CsrNumber::MDBHD);
   if (csr)
     csr->write(upper);
 
@@ -1239,16 +1223,108 @@ EM_JS(void, jsWriteMMIO, (int addr, int size, int value), {
 
 
 template <typename URV>
+ExceptionCause
+Hart<URV>::determineLoadException(unsigned rs1, URV base, URV addr,
+				  unsigned ldSize,
+				  SecondaryCause& secCause)
+{
+  secCause = SecondaryCause::NONE;
+
+  // Misaligned load from io section triggers an exception. Crossing
+  // dccm to non-dccm causes an exception.
+  unsigned alignMask = ldSize - 1;
+  bool misal = addr & alignMask;
+  misalignedLdSt_ = misal;
+  if (misal)
+    {
+      if (misalignedAccessCausesException(addr, ldSize, secCause))
+	return ExceptionCause::LOAD_ADDR_MISAL;
+    }
+
+  // Stack access
+  if (rs1 == RegSp and checkStackAccess_ and not checkStackLoad(addr, ldSize))
+    {
+      secCause = SecondaryCause::LOAD_ACC_STACK_CHECK;
+      return ExceptionCause::LOAD_ACC_FAULT;
+    }
+
+  // DCCM unmapped
+  if (misal)
+    {
+      size_t lba = addr + ldSize - 1;  // Last byte address
+      if (memory_.isAddrInDccm(addr) != memory_.isAddrInDccm(lba) or
+          memory_.isAddrInMappedRegs(addr) != memory_.isAddrInMappedRegs(lba))
+        {
+          secCause = SecondaryCause::LOAD_ACC_LOCAL_UNMAPPED;
+          return ExceptionCause::LOAD_ACC_FAULT;
+        }
+    }
+
+  // DCCM unmapped or out of MPU range
+  bool isReadable = memory_.isAddrReadable(addr);
+  if (not isReadable)
+    {
+      secCause = SecondaryCause::LOAD_ACC_MEM_PROTECTION;
+      size_t region = memory_.getRegionIndex(addr);
+      if (regionHasLocalDataMem_.at(region))
+        {
+          if (not memory_.isAddrInMappedRegs(addr))
+            {
+              secCause = SecondaryCause::LOAD_ACC_LOCAL_UNMAPPED;
+              return ExceptionCause::LOAD_ACC_FAULT;
+            }
+        }
+      else
+        return ExceptionCause::LOAD_ACC_FAULT;
+    }
+
+  // 64-bit load
+  if (wideLdSt_)
+    {
+      bool fail = (addr & 7) or ldSize != 4 or ! isDataAddressExternal(addr);
+      fail = fail or ! memory_.isAddrReadable(addr+4);
+      if (fail)
+	{
+	  secCause = SecondaryCause::LOAD_ACC_64BIT;
+	  return ExceptionCause::LOAD_ACC_FAULT;
+	}
+    }
+
+  // Region predict (Effective address compatible with base).
+  if (eaCompatWithBase_ and effectiveAndBaseAddrMismatch(addr, base))
+    {
+      secCause = SecondaryCause::LOAD_ACC_REGION_PREDICTION;
+      return ExceptionCause::LOAD_ACC_FAULT;
+    }
+
+  // PIC access
+  if (memory_.isAddrInMappedRegs(addr))
+    {
+      if (misal or ldSize != 4)
+	{
+	  secCause = SecondaryCause::LOAD_ACC_PIC;
+	  return ExceptionCause::LOAD_ACC_FAULT;
+	}
+    }
+
+  // Double ecc.
+  if (forceAccessFail_)
+    {
+      secCause = SecondaryCause::LOAD_ACC_DOUBLE_ECC;
+      return ExceptionCause::LOAD_ACC_FAULT;
+    }
+
+  return ExceptionCause::NONE;
+}
+
+
+template <typename URV>
 template <typename LOAD_TYPE>
 bool
-Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
+Hart<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
 {
   URV base = intRegs_.read(rs1);
   URV addr = base + SRV(imm);
-
-  if (rs1 == RegSp and checkStackAccess_)
-    if (not checkStackLoad(addr, sizeof(LOAD_TYPE)))
-      return false;
 
   loadAddr_ = addr;    // For reporting load addr in trace-mode.
   loadAddrValid_ = true;  // For reporting load addr in trace-mode.
@@ -1258,11 +1334,9 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
 
   if (hasActiveTrigger())
     {
-      typedef TriggerTiming Timing;
-
-      bool isLoad = true;
-      if (ldStAddrTriggerHit(addr, Timing::Before, isLoad, isInterruptEnabled()))
-        triggerTripped_ = true;
+      if (ldStAddrTriggerHit(addr, TriggerTiming::Before, true /*isLoad*/,
+			     isInterruptEnabled()))
+	triggerTripped_ = true;
       if (triggerTripped_)
         return false;
     }
@@ -1287,7 +1361,7 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
   // MMIO for javascript
   if(addr > 0xffff0000){
     if (privMode_ == PrivilegeMode::User){
-      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, sizeof(LOAD_TYPE));
+      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, SecondaryCause::NONE);
       return false;
     }
     int c = jsReadMMIO((int) addr, sizeof(LOAD_TYPE));
@@ -1297,23 +1371,15 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
   }
 #endif
 
-  // Misaligned load from io section triggers an exception. Crossing
-  // dccm to non-dccm causes an exception.
   unsigned ldSize = sizeof(LOAD_TYPE);
-  constexpr unsigned alignMask = sizeof(LOAD_TYPE) - 1;
-  bool misal = addr & alignMask;
-  misalignedLdSt_ = misal;
-  if (misal and misalignedAccessCausesException(addr, ldSize))
-    {
-      initiateLoadException(ExceptionCause::LOAD_ADDR_MISAL, addr, ldSize);
-      return false;
-    }
 
-  if (eaCompatWithBase_)
-    forceAccessFail_ = forceAccessFail_ or effectiveAndBaseAddrMismatch(addr, base);
-  if (forceAccessFail_)
+  auto secCause = SecondaryCause::NONE;
+  auto cause = determineLoadException(rs1, base, addr, ldSize, secCause);
+  if (cause != ExceptionCause::NONE)
     {
-      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, ldSize);
+      if (wideLdSt_)
+	ldSize = 8;
+      initiateLoadException(cause, addr, secCause);
       return false;
     }
 
@@ -1337,7 +1403,12 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
       return true;  // Success.
     }
 
-  initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, ldSize);
+  cause = ExceptionCause::LOAD_ACC_FAULT;
+  secCause = SecondaryCause::LOAD_ACC_MEM_PROTECTION;
+  if (memory_.isAddrInMappedRegs(addr))
+    secCause = SecondaryCause::LOAD_ACC_PIC;
+
+  initiateLoadException(cause, addr, secCause);
   return false;
 }
 
@@ -1345,7 +1416,7 @@ Core<URV>::load(uint32_t rd, uint32_t rs1, int32_t imm)
 template <typename URV>
 inline
 void
-Core<URV>::execLw(const DecodedInst* di)
+Hart<URV>::execLw(const DecodedInst* di)
 {
   load<int32_t>(di->op0(), di->op1(), di->op2AsInt());
 }
@@ -1354,7 +1425,7 @@ Core<URV>::execLw(const DecodedInst* di)
 template <typename URV>
 inline
 void
-Core<URV>::execLh(const DecodedInst* di)
+Hart<URV>::execLh(const DecodedInst* di)
 {
   load<int16_t>(di->op0(), di->op1(), di->op2AsInt());
 }
@@ -1363,23 +1434,20 @@ Core<URV>::execLh(const DecodedInst* di)
 template <typename URV>
 inline
 void
-Core<URV>::execSw(const DecodedInst* di)
+Hart<URV>::execSw(const DecodedInst* di)
 {
   uint32_t rs1 = di->op1();
   URV base = intRegs_.read(rs1);
   URV addr = base + SRV(di->op2AsInt());
   uint32_t value = uint32_t(intRegs_.read(di->op0()));
 
-  if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-    return;
-
-  store<uint32_t>(base, addr, value);
+  store<uint32_t>(rs1, base, addr, value);
 }
 
 
 template <typename URV>
 bool
-Core<URV>::readInst(size_t address, uint32_t& inst)
+Hart<URV>::readInst(size_t address, uint32_t& inst)
 {
   inst = 0;
 
@@ -1403,7 +1471,7 @@ Core<URV>::readInst(size_t address, uint32_t& inst)
 
 template <typename URV>
 bool
-Core<URV>::defineIccm(size_t region, size_t offset, size_t size)
+Hart<URV>::defineIccm(size_t region, size_t offset, size_t size)
 {
   bool ok = memory_.defineIccm(region, offset, size);
   if (ok)
@@ -1417,13 +1485,14 @@ Core<URV>::defineIccm(size_t region, size_t offset, size_t size)
 
 template <typename URV>
 bool
-Core<URV>::defineDccm(size_t region, size_t offset, size_t size)
+Hart<URV>::defineDccm(size_t region, size_t offset, size_t size)
 {
   bool ok = memory_.defineDccm(region, offset, size);
   if (ok)
     {
       regionHasLocalMem_.at(region) = true;
       regionHasLocalDataMem_.at(region) = true;
+      regionHasDccm_.at(region) = true;
     }
   return ok;
 }
@@ -1431,14 +1500,15 @@ Core<URV>::defineDccm(size_t region, size_t offset, size_t size)
 
 template <typename URV>
 bool
-Core<URV>::defineMemoryMappedRegisterRegion(size_t region, size_t offset,
-                                          size_t size)
+Hart<URV>::defineMemoryMappedRegisterRegion(size_t region, size_t offset,
+					  size_t size)
 {
   bool ok = memory_.defineMemoryMappedRegisterRegion(region, offset, size);
   if (ok)
     {
       regionHasLocalMem_.at(region) = true;
       regionHasLocalDataMem_.at(region) = true;
+      regionHasMemMappedRegs_.at(region) = true;
     }
   return ok;
 }
@@ -1446,11 +1516,11 @@ Core<URV>::defineMemoryMappedRegisterRegion(size_t region, size_t offset,
 
 template <typename URV>
 bool
-Core<URV>::defineMemoryMappedRegisterWriteMask(size_t region,
-                                               size_t regionOffset,
-                                               size_t registerBlockOffset,
-                                               size_t registerIx,
-                                               uint32_t mask)
+Hart<URV>::defineMemoryMappedRegisterWriteMask(size_t region,
+					       size_t regionOffset,
+					       size_t registerBlockOffset,
+					       size_t registerIx,
+					       uint32_t mask)
 {
   return memory_.defineMemoryMappedRegisterWriteMask(region, regionOffset,
                                                      registerBlockOffset,
@@ -1460,7 +1530,7 @@ Core<URV>::defineMemoryMappedRegisterWriteMask(size_t region,
 
 template <typename URV>
 bool
-Core<URV>::configMemoryFetch(const std::vector< std::pair<URV,URV> >& windows)
+Hart<URV>::configMemoryFetch(const std::vector< std::pair<URV,URV> >& windows)
 {
   using std::cerr;
 
@@ -1513,7 +1583,7 @@ Core<URV>::configMemoryFetch(const std::vector< std::pair<URV,URV> >& windows)
 
 template <typename URV>
 bool
-Core<URV>::configMemoryDataAccess(const std::vector< std::pair<URV,URV> >& windows)
+Hart<URV>::configMemoryDataAccess(const std::vector< std::pair<URV,URV> >& windows)
 {
   using std::cerr;
 
@@ -1525,7 +1595,7 @@ Core<URV>::configMemoryDataAccess(const std::vector< std::pair<URV,URV> >& windo
   if (memory_.size() == 0)
     return true;
 
-  // Mark all pages in non-dccm regions as non accessible.
+  // Mark all pages in non-dccm/pic regions as non accessible.
   size_t pageSize = memory_.pageSize();
   for (size_t addr = 0; addr < memory_.size(); addr += pageSize)
     {
@@ -1537,6 +1607,8 @@ Core<URV>::configMemoryDataAccess(const std::vector< std::pair<URV,URV> >& windo
         }
     }
 
+  // Mark pages in configuration windows as accessible except when
+  // they fall in dccm/pic regions.
   for (auto& window : windows)
     {
       if (window.first > window.second)
@@ -1576,13 +1648,18 @@ Core<URV>::configMemoryDataAccess(const std::vector< std::pair<URV,URV> >& windo
 template <typename URV>
 inline
 bool
-Core<URV>::fetchInst(URV addr, uint32_t& inst)
+Hart<URV>::fetchInst(URV addr, uint32_t& inst)
 {
   if (forceFetchFail_)
     {
       forceFetchFail_ = false;
+      readInst(addr, inst);
       URV info = pc_ + forceFetchFailOffset_;
-      initiateException(ExceptionCause::INST_ACC_FAULT, pc_, info);
+      auto cause = ExceptionCause::INST_ACC_FAULT;
+      auto secCause = SecondaryCause::INST_BUS_ERROR;
+      if (memory_.isAddrInIccm(addr))
+	secCause = SecondaryCause::INST_DOUBLE_ECC;
+      initiateException(cause, pc_, info, secCause);
       return false;
     }
 
@@ -1598,7 +1675,11 @@ Core<URV>::fetchInst(URV addr, uint32_t& inst)
   uint16_t half;
   if (not memory_.readInstHalfWord(addr, half))
     {
-      initiateException(ExceptionCause::INST_ACC_FAULT, addr, addr);
+      auto secCause = SecondaryCause::INST_MEM_PROTECTION;
+      size_t region = memory_.getRegionIndex(addr);
+      if (regionHasLocalInstMem_.at(region))
+	secCause = SecondaryCause::INST_LOCAL_UNMAPPED;
+      initiateException(ExceptionCause::INST_ACC_FAULT, addr, addr, secCause);
       return false;
     }
 
@@ -1616,7 +1697,7 @@ Core<URV>::fetchInst(URV addr, uint32_t& inst)
 
 template <typename URV>
 bool
-Core<URV>::fetchInstPostTrigger(URV addr, uint32_t& inst, FILE* traceFile)
+Hart<URV>::fetchInstPostTrigger(URV addr, uint32_t& inst, FILE* traceFile)
 {
   URV info = addr;
 
@@ -1636,7 +1717,7 @@ Core<URV>::fetchInstPostTrigger(URV addr, uint32_t& inst, FILE* traceFile)
     }
 
   // Fetch failed: take pending trigger-exception.
-  takeTriggerAction(traceFile, addr, info, counter_, true);
+  takeTriggerAction(traceFile, addr, info, instCounter_, true);
   forceFetchFail_ = false;
 
   return false;
@@ -1645,11 +1726,11 @@ Core<URV>::fetchInstPostTrigger(URV addr, uint32_t& inst, FILE* traceFile)
 static std::mutex printInstTraceMutex;
 // This is set to false when user hits control-c to interrupt a long
 // run.
-volatile static bool userOk = true;
+static std::atomic<bool> userOk = true;
 
 template <typename URV>
 void
-Core<URV>::illegalInst()
+Hart<URV>::illegalInst()
 {
   if (triggerTripped_)
     return;
@@ -1689,7 +1770,7 @@ Core<URV>::illegalInst()
 
 template <typename URV>
 void
-Core<URV>::unimplemented()
+Hart<URV>::unimplemented()
 {
   illegalInst();
 }
@@ -1701,13 +1782,14 @@ Core<URV>::unimplemented()
 // table.
 template <typename URV>
 void
-Core<URV>::initiateFastInterrupt(InterruptCause cause, URV pcToSave)
+Hart<URV>::initiateFastInterrupt(InterruptCause cause, URV pcToSave)
 {
   // Get the address of the interrupt handler entry from meihap
   // register.
   URV addr = 0;
+  bool debugMode = false;
   if (not csRegs_.read(CsrNumber::MEIHAP, PrivilegeMode::Machine,
-                       debugMode_, addr))
+		       debugMode, addr))
     {
       initiateNmi(URV(NmiCause::UNKNOWN), pcToSave);
       return;
@@ -1740,13 +1822,23 @@ Core<URV>::initiateFastInterrupt(InterruptCause cause, URV pcToSave)
   URV causeVal = URV(cause);
   causeVal |= 1 << (mxlen_ - 1);  // Set most sig bit.
   undelegatedInterrupt(causeVal, pcToSave, nextPc);
+
+  bool doPerf = enableCounters_ and countersCsrOn_; // Performance counters
+  if (not doPerf)
+    return;
+
+  PerfRegs& pregs = csRegs_.mPerfRegs_;
+  if (cause == InterruptCause::M_EXTERNAL)
+    pregs.updateCounters(EventNumber::ExternalInterrupt);
+  else if (cause == InterruptCause::M_TIMER)
+    pregs.updateCounters(EventNumber::TimerInterrupt);
 }
 
 
 // Start an asynchronous exception.
 template <typename URV>
 void
-Core<URV>::initiateInterrupt(InterruptCause cause, URV pc)
+Hart<URV>::initiateInterrupt(InterruptCause cause, URV pc)
 {
   if (fastInterrupts_ and cause == InterruptCause::M_EXTERNAL)
     {
@@ -1756,7 +1848,8 @@ Core<URV>::initiateInterrupt(InterruptCause cause, URV pc)
 
   bool interrupt = true;
   URV info = 0;  // This goes into mtval.
-  initiateTrap(interrupt, URV(cause), pc, info);
+  auto secCause = SecondaryCause::NONE;
+  initiateTrap(interrupt, URV(cause), pc, info, URV(secCause));
 
   interruptCount_++;
 
@@ -1775,12 +1868,13 @@ Core<URV>::initiateInterrupt(InterruptCause cause, URV pc)
 // Start a synchronous exception.
 template <typename URV>
 void
-Core<URV>::initiateException(ExceptionCause cause, URV pc, URV info)
+Hart<URV>::initiateException(ExceptionCause cause, URV pc, URV info,
+			     SecondaryCause secCause)
 {
   bool interrupt = false;
   exceptionCount_++;
   hasException_ = true;
-  initiateTrap(interrupt, URV(cause), pc, info);
+  initiateTrap(interrupt, URV(cause), pc, info, URV(secCause));
 
   PerfRegs& pregs = csRegs_.mPerfRegs_;
   if (enableCounters_ and countersCsrOn_)
@@ -1790,11 +1884,12 @@ Core<URV>::initiateException(ExceptionCause cause, URV pc, URV info)
 
 template <typename URV>
 void
-Core<URV>::initiateTrap(bool interrupt, URV cause, URV pcToSave, URV info)
+Hart<URV>::initiateTrap(bool interrupt, URV cause, URV pcToSave, URV info,
+			URV secCause)
 {
   enableWideLdStMode(false);  // Swerv specific feature.
 
-  hasLr_ = false;  // Load-reservation lost.
+  memory_.invalidateLr(localHartId_);
 
   PrivilegeMode origMode = privMode_;
 
@@ -1807,6 +1902,7 @@ Core<URV>::initiateTrap(bool interrupt, URV cause, URV pcToSave, URV info)
 
   CsrNumber epcNum = CsrNumber::MEPC;
   CsrNumber causeNum = CsrNumber::MCAUSE;
+  CsrNumber scauseNum = CsrNumber::MSCAUSE;
   CsrNumber tvalNum = CsrNumber::MTVAL;
   CsrNumber tvecNum = CsrNumber::MTVEC;
 
@@ -1827,24 +1923,28 @@ Core<URV>::initiateTrap(bool interrupt, URV cause, URV pcToSave, URV info)
 
   // Save address of instruction that caused the exception or address
   // of interrupted instruction.
-  if (not csRegs_.write(epcNum, privMode_, debugMode_, pcToSave & ~(URV(1))))
+  bool debugMode = false;
+  if (not csRegs_.write(epcNum, privMode_, debugMode, pcToSave & ~(URV(1))))
     assert(0 and "Failed to write EPC register");
 
   // Save the exception cause.
   URV causeRegVal = cause;
   if (interrupt)
     causeRegVal |= 1 << (mxlen_ - 1);
-  if (not csRegs_.write(causeNum, privMode_, debugMode_, causeRegVal))
+  if (not csRegs_.write(causeNum, privMode_, debugMode, causeRegVal))
     assert(0 and "Failed to write CAUSE register");
 
+  // Save secondary exception cause (WD special).
+  csRegs_.write(scauseNum, privMode_, debugMode, secCause);
+
   // Clear mtval on interrupts. Save synchronous exception info.
-  if (not csRegs_.write(tvalNum, privMode_, debugMode_, info))
+  if (not csRegs_.write(tvalNum, privMode_, debugMode, info))
     assert(0 and "Failed to write TVAL register");
 
   // Update status register saving xIE in xPIE and previous privilege
   // mode in xPP by getting current value of mstatus ...
   URV status = 0;
-  if (not csRegs_.read(CsrNumber::MSTATUS, privMode_, debugMode_, status))
+  if (not csRegs_.read(CsrNumber::MSTATUS, privMode_, debugMode, status))
     assert(0 and "Failed to read MSTATUS register");
 
   // ... updating its fields
@@ -1869,12 +1969,12 @@ Core<URV>::initiateTrap(bool interrupt, URV cause, URV pcToSave, URV info)
     }
 
   // ... and putting it back
-  if (not csRegs_.write(CsrNumber::MSTATUS, privMode_, debugMode_, msf.value_))
+  if (not csRegs_.write(CsrNumber::MSTATUS, privMode_, debugMode, msf.value_))
     assert(0 and "Failed to write MSTATUS register");
   
   // Set program counter to trap handler address.
   URV tvec = 0;
-  if (not csRegs_.read(tvecNum, privMode_, debugMode_, tvec))
+  if (not csRegs_.read(tvecNum, privMode_, debugMode, tvec))
     assert(0 and "Failed to read TVEC register");
 
   URV base = (tvec >> 2) << 2;  // Clear least sig 2 bits.
@@ -1892,7 +1992,7 @@ Core<URV>::initiateTrap(bool interrupt, URV cause, URV pcToSave, URV info)
 
 template <typename URV>
 void
-Core<URV>::initiateNmi(URV cause, URV pcToSave)
+Hart<URV>::initiateNmi(URV cause, URV pcToSave)
 {
   URV nextPc = nmiPc_;
   undelegatedInterrupt(cause, pcToSave, nextPc);
@@ -1901,12 +2001,12 @@ Core<URV>::initiateNmi(URV cause, URV pcToSave)
 
 template <typename URV>
 void
-Core<URV>::undelegatedInterrupt(URV cause, URV pcToSave, URV nextPc)
+Hart<URV>::undelegatedInterrupt(URV cause, URV pcToSave, URV nextPc)
 {
   enableWideLdStMode(false);  // Swerv specific feature.
 
   interruptCount_++;
-  hasLr_ = false;  // Load-reservation lost.
+  memory_.invalidateLr(localHartId_);
 
   PrivilegeMode origMode = privMode_;
 
@@ -1915,22 +2015,26 @@ Core<URV>::undelegatedInterrupt(URV cause, URV pcToSave, URV nextPc)
 
   // Save address of instruction that caused the exception or address
   // of interrupted instruction.
+  bool debugMode = false;
   pcToSave = (pcToSave >> 1) << 1; // Clear least sig bit.
-  if (not csRegs_.write(CsrNumber::MEPC, privMode_, debugMode_, pcToSave))
+  if (not csRegs_.write(CsrNumber::MEPC, privMode_, debugMode, pcToSave))
     assert(0 and "Failed to write EPC register");
 
   // Save the exception cause.
-  if (not csRegs_.write(CsrNumber::MCAUSE, privMode_, debugMode_, cause))
+  if (not csRegs_.write(CsrNumber::MCAUSE, privMode_, debugMode, cause))
     assert(0 and "Failed to write CAUSE register");
 
+  // Save secondary exception cause (WD special).
+  csRegs_.write(CsrNumber::MSCAUSE, privMode_, debugMode, 0);
+
   // Clear mtval
-  if (not csRegs_.write(CsrNumber::MTVAL, privMode_, debugMode_, 0))
+  if (not csRegs_.write(CsrNumber::MTVAL, privMode_, debugMode, 0))
     assert(0 and "Failed to write MTVAL register");
 
   // Update status register saving xIE in xPIE and previous privilege
   // mode in xPP by getting current value of mstatus ...
   URV status = 0;
-  if (not csRegs_.read(CsrNumber::MSTATUS, privMode_, debugMode_, status))
+  if (not csRegs_.read(CsrNumber::MSTATUS, privMode_, debugMode, status))
     assert(0 and "Failed to read MSTATUS register");
   // ... updating its fields
   MstatusFields<URV> msf(status);
@@ -1940,7 +2044,7 @@ Core<URV>::undelegatedInterrupt(URV cause, URV pcToSave, URV nextPc)
   msf.bits_.MIE = 0;
 
   // ... and putting it back
-  if (not csRegs_.write(CsrNumber::MSTATUS, privMode_, debugMode_, msf.value_))
+  if (not csRegs_.write(CsrNumber::MSTATUS, privMode_, debugMode, msf.value_))
     assert(0 and "Failed to write MSTATUS register");
   
   // Clear pending nmi bit in dcsr
@@ -1958,7 +2062,7 @@ Core<URV>::undelegatedInterrupt(URV cause, URV pcToSave, URV nextPc)
 
 template <typename URV>
 bool
-Core<URV>::peekIntReg(unsigned ix, URV& val) const
+Hart<URV>::peekIntReg(unsigned ix, URV& val) const
 { 
   if (ix < intRegs_.size())
     {
@@ -1971,7 +2075,7 @@ Core<URV>::peekIntReg(unsigned ix, URV& val) const
 
 template <typename URV>
 URV
-Core<URV>::peekIntReg(unsigned ix) const
+Hart<URV>::peekIntReg(unsigned ix) const
 { 
   assert(ix < intRegs_.size());
   return intRegs_.read(ix);
@@ -1980,7 +2084,7 @@ Core<URV>::peekIntReg(unsigned ix) const
 
 template <typename URV>
 bool
-Core<URV>::peekIntReg(unsigned ix, URV& val, std::string& name) const
+Hart<URV>::peekIntReg(unsigned ix, URV& val, std::string& name) const
 { 
   if (ix < intRegs_.size())
     {
@@ -1994,7 +2098,7 @@ Core<URV>::peekIntReg(unsigned ix, URV& val, std::string& name) const
 
 template <typename URV>
 bool
-Core<URV>::peekFpReg(unsigned ix, uint64_t& val) const
+Hart<URV>::peekFpReg(unsigned ix, uint64_t& val) const
 { 
   if (not isRvf() and not isRvd())
     return false;
@@ -2011,7 +2115,7 @@ Core<URV>::peekFpReg(unsigned ix, uint64_t& val) const
 
 template <typename URV>
 bool
-Core<URV>::pokeFpReg(unsigned ix, uint64_t val)
+Hart<URV>::pokeFpReg(unsigned ix, uint64_t val)
 { 
   if (not isRvf() and not isRvd())
     return false;
@@ -2028,7 +2132,7 @@ Core<URV>::pokeFpReg(unsigned ix, uint64_t val)
 
 template <typename URV>
 bool
-Core<URV>::pokeIntReg(unsigned ix, URV val)
+Hart<URV>::pokeIntReg(unsigned ix, URV val)
 { 
   if (ix < intRegs_.size())
     {
@@ -2041,7 +2145,7 @@ Core<URV>::pokeIntReg(unsigned ix, URV val)
 
 template <typename URV>
 bool
-Core<URV>::peekCsr(CsrNumber csrn, URV& val) const
+Hart<URV>::peekCsr(CsrNumber csrn, URV& val) const
 { 
   return csRegs_.peek(csrn, val);
 }
@@ -2049,8 +2153,8 @@ Core<URV>::peekCsr(CsrNumber csrn, URV& val) const
 
 template <typename URV>
 bool
-Core<URV>::peekCsr(CsrNumber csrn, URV& val, URV& reset, URV& writeMask,
-                   URV& pokeMask) const
+Hart<URV>::peekCsr(CsrNumber csrn, URV& val, URV& reset, URV& writeMask,
+		   URV& pokeMask) const
 { 
   const Csr<URV>* csr = csRegs_.getImplementedCsr(csrn);
   if (not csr)
@@ -2068,7 +2172,7 @@ Core<URV>::peekCsr(CsrNumber csrn, URV& val, URV& reset, URV& writeMask,
 
 template <typename URV>
 bool
-Core<URV>::peekCsr(CsrNumber csrn, URV& val, std::string& name) const
+Hart<URV>::peekCsr(CsrNumber csrn, URV& val, std::string& name) const
 { 
   const Csr<URV>* csr = csRegs_.getImplementedCsr(csrn);
   if (not csr)
@@ -2084,7 +2188,7 @@ Core<URV>::peekCsr(CsrNumber csrn, URV& val, std::string& name) const
 
 template <typename URV>
 bool
-Core<URV>::pokeCsr(CsrNumber csr, URV val)
+Hart<URV>::pokeCsr(CsrNumber csr, URV val)
 { 
   // Direct write to MEIHAP will not affect claimid field. Poking
   // MEIHAP will only affect the claimid field.
@@ -2103,7 +2207,8 @@ Core<URV>::pokeCsr(CsrNumber csr, URV val)
   // Some/all bits of some CSRs are read only to CSR instructions but
   // are modifiable. Use the poke method (instead of write) to make
   // sure modifiable value are changed.
-  bool result = csRegs_.poke(csr, val);
+  if (not csRegs_.poke(csr, val))
+    return false;
 
   if (csr == CsrNumber::DCSR)
     {
@@ -2124,13 +2229,13 @@ Core<URV>::pokeCsr(CsrNumber csr, URV val)
   else if (csr == CsrNumber::MDBAC)
     enableWideLdStMode(true);
 
-  return result;
+  return true;
 }
 
 
 template <typename URV>
 URV
-Core<URV>::peekPc() const
+Hart<URV>::peekPc() const
 {
   return pc_;
 }
@@ -2138,7 +2243,7 @@ Core<URV>::peekPc() const
 
 template <typename URV>
 void
-Core<URV>::pokePc(URV address)
+Hart<URV>::pokePc(URV address)
 {
   pc_ = (address >> 1) << 1; // Clear least sig big
 }
@@ -2146,7 +2251,7 @@ Core<URV>::pokePc(URV address)
 
 template <typename URV>
 bool
-Core<URV>::findIntReg(const std::string& name, unsigned& num) const
+Hart<URV>::findIntReg(const std::string& name, unsigned& num) const
 {
   if (intRegs_.findReg(name, num))
     return true;
@@ -2164,7 +2269,7 @@ Core<URV>::findIntReg(const std::string& name, unsigned& num) const
 
 template <typename URV>
 bool
-Core<URV>::findFpReg(const std::string& name, unsigned& num) const
+Hart<URV>::findFpReg(const std::string& name, unsigned& num) const
 {
   if (not isRvf())
     return false;   // Floating point extension not enabled.
@@ -2193,10 +2298,10 @@ Core<URV>::findFpReg(const std::string& name, unsigned& num) const
 
 
 template <typename URV>
-const Csr<URV>*
-Core<URV>::findCsr(const std::string& name) const
+Csr<URV>*
+Hart<URV>::findCsr(const std::string& name)
 {
-  const Csr<URV>* csr = csRegs_.findCsr(name);
+  Csr<URV>* csr = csRegs_.findCsr(name);
 
   if (not csr)
     {
@@ -2211,19 +2316,19 @@ Core<URV>::findCsr(const std::string& name) const
 
 template <typename URV>
 bool
-Core<URV>::configCsr(const std::string& name, bool implemented,
-                     URV resetValue, URV mask, URV pokeMask, bool debug)
+Hart<URV>::configCsr(const std::string& name, bool implemented, URV resetValue,
+                     URV mask, URV pokeMask, bool debug, bool shared)
 {
   return csRegs_.configCsr(name, implemented, resetValue, mask, pokeMask,
-                           debug);
+			   debug, shared);
 }
 
 
 template <typename URV>
 bool
-Core<URV>::defineCsr(const std::string& name, CsrNumber num,
-                     bool implemented, URV resetVal, URV mask,
-                     URV pokeMask, bool isDebug)
+Hart<URV>::defineCsr(const std::string& name, CsrNumber num,
+		     bool implemented, URV resetVal, URV mask,
+		     URV pokeMask, bool isDebug)
 {
   bool mandatory = false, quiet = true;
   auto c = csRegs_.defineCsr(name, num, mandatory, implemented, resetVal,
@@ -2234,7 +2339,7 @@ Core<URV>::defineCsr(const std::string& name, CsrNumber num,
 
 template <typename URV>
 bool
-Core<URV>::configMachineModePerfCounters(unsigned numCounters)
+Hart<URV>::configMachineModePerfCounters(unsigned numCounters)
 {
   return csRegs_.configMachineModePerfCounters(numCounters);
 }
@@ -2309,10 +2414,13 @@ formatFpInstTrace<uint64_t>(FILE* out, uint64_t tag, unsigned hartId, uint64_t c
           tag, hartId, currPc, opcode, uint64_t(fpReg), fpVal, assembly);
 }
 
+
+static std::mutex stderrMutex;
+
 template <typename URV>
 void
-Core<URV>::printInstTrace(uint32_t inst, uint64_t tag, std::string& tmp,
-                          FILE* out, bool interrupt)
+Hart<URV>::printInstTrace(uint32_t inst, uint64_t tag, std::string& tmp,
+			  FILE* out, bool interrupt)
 {
   DecodedInst di;
   decode(pc_, inst, di);
@@ -2323,8 +2431,8 @@ Core<URV>::printInstTrace(uint32_t inst, uint64_t tag, std::string& tmp,
 
 template <typename URV>
 void
-Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
-                          FILE* out, bool interrupt)
+Hart<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
+			  FILE* out, bool interrupt)
 {
   // Serialize to avoid jumbled output.
   std::lock_guard<std::mutex> guard(printInstTraceMutex);
@@ -2354,8 +2462,8 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
   if (reg > 0)
     {
       value = intRegs_.read(reg);
-      formatInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, 'r', reg,
-                           value, tmp.c_str());
+      formatInstTrace<URV>(out, tag, localHartId_, currPc_, instBuff, 'r', reg,
+			   value, tmp.c_str());
       pending = true;
     }
 
@@ -2363,10 +2471,10 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
   int fpReg = fpRegs_.getLastWrittenReg();
   if (fpReg >= 0)
     {
-      uint64_t val = fpRegs_.readBits(fpReg);
+      uint64_t val = fpRegs_.readBitsRaw(fpReg);
       if (pending) fprintf(out, "  +\n");
-      formatFpInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, fpReg,
-                             val, tmp.c_str());
+      formatFpInstTrace<URV>(out, tag, localHartId_, currPc_, instBuff, fpReg,
+			     val, tmp.c_str());
       pending = true;
     }
 
@@ -2381,8 +2489,9 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
 
   for (CsrNumber csr : csrs)
     {
-      if (not csRegs_.read(csr, PrivilegeMode::Machine, debugMode_, value))
-        continue;
+      bool debugMode = false;
+      if (not csRegs_.read(csr, PrivilegeMode::Machine, debugMode, value))
+	continue;
 
       if (csr >= CsrNumber::TDATA1 and csr <= CsrNumber::TDATA3)
         {
@@ -2419,22 +2528,22 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
   for (const auto& [key, val] : csrMap)
     {
       if (pending) fprintf(out, "  +\n");
-      formatInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, 'c',
-                           key, val, tmp.c_str());
+      formatInstTrace<URV>(out, tag, localHartId_, currPc_, instBuff, 'c',
+			   key, val, tmp.c_str());
       pending = true;
     }
 
   // Process memory diff.
   size_t address = 0;
   uint64_t memValue = 0;
-  unsigned writeSize = memory_.getLastWriteNewValue(address, memValue);
+  unsigned writeSize = memory_.getLastWriteNewValue(localHartId_, address, memValue);
   if (writeSize > 0)
     {
       if (pending)
         fprintf(out, "  +\n");
 
-      formatInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, 'm',
-                           URV(address), URV(memValue), tmp.c_str());
+      formatInstTrace<URV>(out, tag, localHartId_, currPc_, instBuff, 'm',
+			   URV(address), URV(memValue), tmp.c_str());
       pending = true;
     }
 
@@ -2443,8 +2552,8 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
   else
     {
       // No diffs: Generate an x0 record.
-      formatInstTrace<URV>(out, tag, hartId_, currPc_, instBuff, 'r', 0, 0,
-                          tmp.c_str());
+      formatInstTrace<URV>(out, tag, localHartId_, currPc_, instBuff, 'r', 0, 0,
+			  tmp.c_str());
       fprintf(out, "\n");
     }
 }
@@ -2452,7 +2561,7 @@ Core<URV>::printInstTrace(const DecodedInst& di, uint64_t tag, std::string& tmp,
 
 template <typename URV>
 void
-Core<URV>::undoForTrigger()
+Hart<URV>::undoForTrigger()
 {
   unsigned regIx = 0;
   URV value = 0;
@@ -2509,14 +2618,37 @@ addToUnsignedHistogram(std::vector<uint64_t>& histo, uint64_t val)
 }
 
 
+/// Return true if given hart is in debug mode and the stop count bit of
+/// the DSCR register is set.
+template <typename URV>
+bool
+isDebugModeStopCount(const Hart<URV>& hart)
+{
+  if (not hart.inDebugMode())
+    return false;
+
+  URV dcsrVal = 0;
+  if (not hart.peekCsr(CsrNumber::DCSR, dcsrVal))
+    return false;
+
+  if ((dcsrVal >> 10) & 1)
+    return true;  // stop count bit is set
+  return false;
+}
+
+
 template <typename URV>
 void
-Core<URV>::updatePerformanceCounters(uint32_t inst, const InstEntry& info,
-                                     uint32_t op0, uint32_t op1)
+Hart<URV>::updatePerformanceCounters(uint32_t inst, const InstEntry& info,
+				     uint32_t op0, uint32_t op1)
 {
+  InstId id = info.instId();
+
+  if (isDebugModeStopCount(*this))
+    return;
+
   // We do not update the performance counters if an instruction
   // causes an exception unless it is an ebreak or an ecall.
-  InstId id = info.instId();
   if (hasException_ and id != InstId::ecall and id != InstId::ebreak and
       id != InstId::c_ebreak)
     return;
@@ -2559,13 +2691,24 @@ Core<URV>::updatePerformanceCounters(uint32_t inst, const InstEntry& info,
     {
       pregs.updateCounters(EventNumber::Load);
       if (misalignedLdSt_)
-        pregs.updateCounters(EventNumber::MisalignLoad);
+	pregs.updateCounters(EventNumber::MisalignLoad);
+      if (isDataAddressExternal(loadAddr_))
+	pregs.updateCounters(EventNumber::BusLoad);
     }
   else if (info.isStore())
     {
       pregs.updateCounters(EventNumber::Store);
       if (misalignedLdSt_)
-        pregs.updateCounters(EventNumber::MisalignStore);
+	pregs.updateCounters(EventNumber::MisalignStore);
+      size_t addr = 0;
+      uint64_t value = 0;
+      memory_.getLastWriteOldValue(addr, value);
+      if (isDataAddressExternal(addr))
+	pregs.updateCounters(EventNumber::BusStore);
+    }
+  else if (info.type() == InstType::Zbb or info.type() == InstType::Zbs)
+    {
+      pregs.updateCounters(EventNumber::Bitmanip);
     }
   else if (info.isAtomic())
     {
@@ -2632,7 +2775,7 @@ Core<URV>::updatePerformanceCounters(uint32_t inst, const InstEntry& info,
 
 template <typename URV>
 void
-Core<URV>::accumulateInstructionStats(const DecodedInst& di)
+Hart<URV>::accumulateInstructionStats(const DecodedInst& di)
 {
   const InstEntry& info = *(di.instEntry());
 
@@ -2763,19 +2906,19 @@ Core<URV>::accumulateInstructionStats(const DecodedInst& di)
 template <typename URV>
 inline
 void
-Core<URV>::clearTraceData()
+Hart<URV>::clearTraceData()
 {
   intRegs_.clearLastWrittenReg();
   fpRegs_.clearLastWrittenReg();
   csRegs_.clearLastWrittenRegs();
-  memory_.clearLastWriteInfo();
+  memory_.clearLastWriteInfo(localHartId_);
 }
 
 
 template <typename URV>
 inline
 void
-Core<URV>::setTargetProgramBreak(URV addr)
+Hart<URV>::setTargetProgramBreak(URV addr)
 {
   progBreak_ = addr;
 
@@ -2788,7 +2931,7 @@ Core<URV>::setTargetProgramBreak(URV addr)
 template <typename URV>
 inline
 bool
-Core<URV>::setTargetProgramArgs(const std::vector<std::string>& args)
+Hart<URV>::setTargetProgramArgs(const std::vector<std::string>& args)
 {
   URV sp = 0;
 
@@ -2851,7 +2994,7 @@ Core<URV>::setTargetProgramArgs(const std::vector<std::string>& args)
 
 template <typename URV>
 URV
-Core<URV>::lastPc() const
+Hart<URV>::lastPc() const
 {
   return currPc_;
 }
@@ -2859,7 +3002,7 @@ Core<URV>::lastPc() const
 
 template <typename URV>
 int
-Core<URV>::lastIntReg() const
+Hart<URV>::lastIntReg() const
 {
   return intRegs_.getLastWrittenReg();
 }
@@ -2867,7 +3010,7 @@ Core<URV>::lastIntReg() const
 
 template <typename URV>
 int
-Core<URV>::lastFpReg() const
+Hart<URV>::lastFpReg() const
 {
   return fpRegs_.getLastWrittenReg();
 }
@@ -2875,8 +3018,8 @@ Core<URV>::lastFpReg() const
 
 template <typename URV>
 void
-Core<URV>::lastCsr(std::vector<CsrNumber>& csrs,
-                   std::vector<unsigned>& triggers) const
+Hart<URV>::lastCsr(std::vector<CsrNumber>& csrs,
+		   std::vector<unsigned>& triggers) const
 {
   csRegs_.getLastWrittenRegs(csrs, triggers);
 }
@@ -2884,15 +3027,15 @@ Core<URV>::lastCsr(std::vector<CsrNumber>& csrs,
 
 template <typename URV>
 void
-Core<URV>::lastMemory(std::vector<size_t>& addresses,
-                      std::vector<uint32_t>& words) const
+Hart<URV>::lastMemory(std::vector<size_t>& addresses,
+		      std::vector<uint32_t>& words) const
 {
   addresses.clear();
   words.clear();
 
   size_t address = 0;
   uint64_t value;
-  unsigned writeSize = memory_.getLastWriteNewValue(address, value);
+  unsigned writeSize = memory_.getLastWriteNewValue(localHartId_, address, value);
 
   if (not writeSize)
     return;
@@ -2912,14 +3055,14 @@ Core<URV>::lastMemory(std::vector<size_t>& addresses,
 
 template <typename URV>
 void
-handleExceptionForGdb(WdRiscv::Core<URV>& core);
+handleExceptionForGdb(WdRiscv::Hart<URV>& hart);
 
 
 // Return true if debug mode is entered and false otherwise.
 template <typename URV>
 bool
-Core<URV>::takeTriggerAction(FILE* traceFile, URV pc, URV info,
-                             uint64_t& counter, bool beforeTiming)
+Hart<URV>::takeTriggerAction(FILE* traceFile, URV pc, URV info,
+			     uint64_t& counter, bool beforeTiming)
 {
   // Check triggers configuration to determine action: take breakpoint
   // exception or enter debugger.
@@ -2933,12 +3076,15 @@ Core<URV>::takeTriggerAction(FILE* traceFile, URV pc, URV info,
     }
   else
     {
-      initiateException(ExceptionCause::BREAKP, pc, info);
+      bool doingWide = wideLdSt_;
+      auto secCause = SecondaryCause::TRIGGER_HIT;
+      initiateException(ExceptionCause::BREAKP, pc, info, secCause);
       if (dcsrStep_)
-        {
-          enterDebugMode(DebugModeCause::TRIGGER, pc_);
-          enteredDebug = true;
-        }
+	{
+	  enterDebugMode(DebugModeCause::TRIGGER, pc_);
+	  enteredDebug = true;
+	  enableWideLdStMode(doingWide);
+	}
     }
 
   if (beforeTiming and traceFile)
@@ -2954,12 +3100,24 @@ Core<URV>::takeTriggerAction(FILE* traceFile, URV pc, URV info,
 }
 
 
+template <typename URV>
+void
+Hart<URV>::copyMemRegionConfig(const Hart<URV>& other)
+{
+  regionHasLocalMem_ = other.regionHasLocalMem_;
+  regionHasLocalDataMem_ = other.regionHasLocalDataMem_;
+  regionHasDccm_ = other.regionHasDccm_;
+  regionHasMemMappedRegs_ = other.regionHasMemMappedRegs_;
+  regionHasLocalInstMem_ = other.regionHasLocalInstMem_;
+}
+
+
 /// Report the number of retired instruction count and the simulation
 /// rate.
 static void
 reportInstsPerSec(uint64_t instCount, double elapsed, bool keyboardInterrupt)
 {
-  std::lock_guard<std::mutex> guard(printInstTraceMutex);
+  std::lock_guard<std::mutex> guard(stderrMutex);
 
   std::cout.flush();
 
@@ -2974,7 +3132,9 @@ reportInstsPerSec(uint64_t instCount, double elapsed, bool keyboardInterrupt)
 }
 
 
-
+// This is set to false when user hits control-c to interrupt a long
+// run.
+// static std::atomic<bool> userOk = true;
 
 static
 void keyboardInterruptHandler(int)
@@ -2985,7 +3145,51 @@ void keyboardInterruptHandler(int)
 
 template <typename URV>
 bool
-Core<URV>::untilAddress(URV address, FILE* traceFile)
+Hart<URV>::logStop(const CoreException& ce, uint64_t counter, FILE* traceFile)
+{
+  std::lock_guard<std::mutex> guard(stderrMutex);
+
+  bool success = false;
+  bool isRetired = false;
+
+  if (ce.type() == CoreException::Stop)
+    {
+      isRetired = true;
+      success = ce.value() == 1; // Anything besides 1 is a fail.
+      std::cerr << (success? "Successful " : "Error: Failed ")
+		<< "stop: " << ce.what() << ": " << ce.value() << "\n";
+      setTargetProgramFinished(true);
+    }
+  else if (ce.type() == CoreException::Exit)
+    {
+      isRetired = true;
+      std::cerr << "Target program exited with code " << std::dec << ce.value()
+		<< '\n';
+      setTargetProgramFinished(true);
+      return ce.value() == 0;
+    }
+  else
+    std::cerr << "Stopped -- unexpected exception\n";
+
+  if (isRetired)
+    {
+      retiredInsts_++;
+      if (traceFile)
+	{
+	  uint32_t inst = 0;
+	  readInst(currPc_, inst);
+	  std::string instStr;
+	  printInstTrace(inst, counter, instStr, traceFile);
+	}
+    }
+
+  return success;
+}
+
+
+template <typename URV>
+bool
+Hart<URV>::untilAddress(URV address, FILE* traceFile)
 {
   std::string instStr;
   instStr.reserve(128);
@@ -2994,7 +3198,7 @@ Core<URV>::untilAddress(URV address, FILE* traceFile)
   bool trace = traceFile != nullptr or enableTriggers_;
   clearTraceData();
 
-  uint64_t counter = counter_;
+  uint64_t counter = instCounter_;
   uint64_t limit = instCountLim_;
   bool success = true;
   bool doStats = instFreq_ or enableCounters_;
@@ -3012,136 +3216,109 @@ Core<URV>::untilAddress(URV address, FILE* traceFile)
     try
 #endif
     {
-      currPc_ = pc_;
+	  currPc_ = pc_;
 
-      loadAddrValid_ = false;
-      triggerTripped_ = false;
-      hasException_ = false;
+	  loadAddrValid_ = false;
+	  triggerTripped_ = false;
+	  hasException_ = false;
 
-      ++counter;
+	  ++counter;
 
-      // Process pre-execute address trigger and fetch instruction.
-      bool hasTrig = hasActiveInstTrigger();
-      triggerTripped_ = hasTrig && instAddrTriggerHit(pc_,
-                                                      TriggerTiming::Before,
-                                                      isInterruptEnabled());
-      // Fetch instruction.
-      bool fetchOk = true;
-      if (triggerTripped_)
-        {
-          if (not fetchInstPostTrigger(pc_, inst, traceFile))
-            {
-              ++cycleCount_;
-              continue;  // Next instruction in trap handler.
-            }
-        }
-      else
-        fetchOk = fetchInst(pc_, inst);
-      if (not fetchOk)
-        {
-          ++cycleCount_;
-          if (traceFile)
-            printInstTrace(inst, counter, instStr, traceFile);
-          continue;  // Next instruction in trap handler.
-        }
+	  // Process pre-execute address trigger and fetch instruction.
+	  bool hasTrig = hasActiveInstTrigger();
+	  triggerTripped_ = hasTrig && instAddrTriggerHit(pc_,
+							  TriggerTiming::Before,
+							  isInterruptEnabled());
+	  // Fetch instruction.
+	  bool fetchOk = true;
+	  if (triggerTripped_)
+	    {
+	      if (not fetchInstPostTrigger(pc_, inst, traceFile))
+		{
+		  ++cycleCount_;
+		  continue;  // Next instruction in trap handler.
+		}
+	    }
+	  else
+	    fetchOk = fetchInst(pc_, inst);
+	  if (not fetchOk)
+	    {
+	      ++cycleCount_;
+	      if (traceFile)
+		printInstTrace(inst, counter, instStr, traceFile);
+	      continue;  // Next instruction in trap handler.
+	    }
 
-      // Process pre-execute opcode trigger.
-      if (hasTrig and instOpcodeTriggerHit(inst, TriggerTiming::Before,
-                                            isInterruptEnabled()))
-        triggerTripped_ = true;
+	  // Process pre-execute opcode trigger.
+	  if (hasTrig and instOpcodeTriggerHit(inst, TriggerTiming::Before,
+					       isInterruptEnabled()))
+	    triggerTripped_ = true;
 
-      // Decode unless match in decode cache.
-      uint32_t ix = (pc_ >> 1) & decodeCacheMask_;
-      DecodedInst* di = &decodeCache_[ix];
-      if (not di->isValid() or di->address() != pc_)
-        decode(pc_, inst, *di);
+	  // Decode unless match in decode cache.
+	  uint32_t ix = (pc_ >> 1) & decodeCacheMask_;
+	  DecodedInst* di = &decodeCache_[ix];
+	  if (not di->isValid() or di->address() != pc_)
+	    decode(pc_, inst, *di);
 
-      bool doingWide = wideLdSt_;
+	  bool doingWide = wideLdSt_;
 
-      // Execute.
-      pc_ += di->instSize();
-      execute(di);
+	  // Execute.
+	  pc_ += di->instSize();
+	  execute(di);
 
-      if (doingWide)
-        enableWideLdStMode(false);
+	  ++cycleCount_;
 
-      ++cycleCount_;
+	  if (hasException_)
+	    {
+	      if (traceFile)
+		{
+		  printInstTrace(*di, counter, instStr, traceFile);
+		  clearTraceData();
+		}
+	      continue;
+	    }
 
-      if (hasException_)
-        {
-          if (traceFile)
-            {
-              printInstTrace(*di, counter, instStr, traceFile);
-              clearTraceData();
-            }
-          continue;
-        }
+	  if (triggerTripped_)
+	    {
+	      undoForTrigger();
+	      if (takeTriggerAction(traceFile, currPc_, currPc_,
+				    counter, true))
+		return true;
+	      continue;
+	    }
 
-      if (triggerTripped_)
-        {
-          undoForTrigger();
-          if (takeTriggerAction(traceFile, currPc_, currPc_,
-                                counter, true))
-            return true;
-          continue;
-        }
+	  if (doingWide)
+	    enableWideLdStMode(false);
 
-      ++retiredInsts_;
-      if (doStats)
-        accumulateInstructionStats(*di);
+	  ++retiredInsts_;
+	  if (doStats)
+	    accumulateInstructionStats(*di);
 
-      bool icountHit = (enableTriggers_ and isInterruptEnabled() and
-                        icountTriggerHit());
+	  bool icountHit = (enableTriggers_ and isInterruptEnabled() and
+			    icountTriggerHit());
 
-      if (trace)
-        {
-          if (traceFile)
-            printInstTrace(*di, counter, instStr, traceFile);
-          clearTraceData();
-        }
+	  if (trace)
+	    {
+	      if (traceFile)
+		printInstTrace(*di, counter, instStr, traceFile);
+	      clearTraceData();
+	    }
 
-      if (icountHit)
-        if (takeTriggerAction(traceFile, pc_, pc_, counter, false))
-          return true;
-    }
+	  if (icountHit)
+	    if (takeTriggerAction(traceFile, pc_, pc_, counter, false))
+	      return true;
+	}   
 #ifndef DISABLE_EXCEPTIONS
-    catch (const CoreException& ce)
-    {
-      if (ce.type() == CoreException::Stop)
-      {
-        if (trace)
-          {
-            uint32_t inst = 0;
-            readInst(currPc_, inst);
-            if (traceFile)
-              printInstTrace(inst, counter, instStr, traceFile);
-            clearTraceData();
-          }
-        success = ce.value() == 1; // Anything besides 1 is a fail.
-        {
-          std::lock_guard<std::mutex> guard(printInstTraceMutex);
-          std::cerr << (success? "Successful " : "Error: Failed ")
-                    << "stop: " << ce.what() << ": " << ce.value()
-                    << "\n";
-          setTargetProgramFinished(true);
-        }
-        break;
-      }
-      if (ce.type() == CoreException::Exit)
-      {
-        std::lock_guard<std::mutex> guard(printInstTraceMutex);
-        std::cerr << "Target program exited with code " << ce.value()
-                  << '\n';
-        setTargetProgramFinished(true);
-        break;
-      }
-      std::cerr << "Stopped -- unexpected exception\n";
-    }
+  catch (const CoreException& ce)
+	{
+	  success = logStop(ce, counter, traceFile);
+	  break;
+	}
 #endif
   }
 
   // Update retired-instruction and cycle count registers.
-  counter_ = counter;
+  instCounter_ = counter;
 
   return success;
 }
@@ -3149,23 +3326,21 @@ Core<URV>::untilAddress(URV address, FILE* traceFile)
 
 template <typename URV>
 bool
-Core<URV>::runUntilAddress(URV address, FILE* traceFile)
+Hart<URV>::runUntilAddress(URV address, FILE* traceFile)
 {
   struct timeval t0;
   gettimeofday(&t0, nullptr);
 
   uint64_t limit = instCountLim_;
-  uint64_t counter0 = counter_;
+  uint64_t counter0 = instCounter_;
+  userOk = true;
 
 #ifdef __MINGW64__
   __p_sig_fn_t oldAction = nullptr;
   __p_sig_fn_t newAction = keyboardInterruptHandler;
 
-  userOk = true;
   oldAction = signal(SIGINT, newAction);
-
   bool success = untilAddress(address, traceFile);
-
   signal(SIGINT, oldAction);
 #else
   struct sigaction oldAction;
@@ -3173,15 +3348,12 @@ Core<URV>::runUntilAddress(URV address, FILE* traceFile)
   memset(&newAction, 0, sizeof(newAction));
   newAction.sa_handler = keyboardInterruptHandler;
 
-  userOk = true;
   sigaction(SIGINT, &newAction, &oldAction);
-
   bool success = untilAddress(address, traceFile);
-
   sigaction(SIGINT, &oldAction, nullptr);
 #endif
 
-  if (counter_ == limit)
+  if (instCounter_ == limit)
     std::cerr << "Stopped -- Reached instruction limit\n";
   else if (pc_ == address)
     std::cerr << "Stopped -- Reached end address\n";
@@ -3192,7 +3364,7 @@ Core<URV>::runUntilAddress(URV address, FILE* traceFile)
   double elapsed = (double(t1.tv_sec - t0.tv_sec) +
                     double(t1.tv_usec - t0.tv_usec)*1e-6);
 
-  uint64_t numInsts = counter_ - counter0;
+  uint64_t numInsts = instCounter_ - counter0;
 
   reportInstsPerSec(numInsts, elapsed, not userOk);
   return success;
@@ -3201,7 +3373,7 @@ Core<URV>::runUntilAddress(URV address, FILE* traceFile)
 
 template <typename URV>
 bool
-Core<URV>::simpleRun()
+Hart<URV>::simpleRun()
 {
   bool success = true;
 #ifdef __EMSCRIPTEN__
@@ -3216,6 +3388,7 @@ Core<URV>::simpleRun()
     {
       currPc_ = pc_;
       ++cycleCount_;
+      ++instCounter_;
       hasException_ = false;
 
 #ifdef __EMSCRIPTEN__  
@@ -3240,14 +3413,9 @@ Core<URV>::simpleRun()
           decode(pc_, inst, *di);
         }
 
-      bool doingWide = wideLdSt_;
-
       // Execute.
       pc_ += di->instSize();
       execute(di);
-          
-      if (doingWide)
-        enableWideLdStMode(false);
 
       if (not hasException_)
         ++retiredInsts_;
@@ -3255,22 +3423,8 @@ Core<URV>::simpleRun()
   }
 #ifndef DISABLE_EXCEPTIONS
   catch (const CoreException& ce)
-  {
-    std::lock_guard<std::mutex> guard(printInstTraceMutex);
-
-    if (ce.type() == CoreException::Stop)
     {
-      ++retiredInsts_;
-      success = ce.value() == 1; // Anything besides 1 is a fail.
-      std::cerr << (success? "Successful " : "Error: Failed ")
-          << "stop: " << ce.what() << ": " << ce.value() << '\n';
-      setTargetProgramFinished(true);
-    }
-    else if (ce.type() == CoreException::Exit)
-    {
-      std::cerr << "Target program exited with code " << ce.value() << '\n';
-      success = ce.value() == 0;
-      setTargetProgramFinished(true);
+      success = logStop(ce, 0, nullptr);
     }
     else
     {
@@ -3288,7 +3442,7 @@ Core<URV>::simpleRun()
 /// a write is attempted to that address.
 template <typename URV>
 bool
-Core<URV>::run(FILE* file)
+Hart<URV>::run(FILE* file)
 {
   // If test has toHost defined then use that as the stopping criteria
   // and ignore the stop address. Not having to check for the stop
@@ -3296,28 +3450,28 @@ Core<URV>::run(FILE* file)
   if (stopAddrValid_ and not toHostValid_)
     return runUntilAddress(stopAddr_, file);
 
-  // To run fast, this method does not do much besides straight-forward
-  // execution. If any option is turned on, we switch to
-  // runUntilAdress which runs slower but is full-featured.
-  if (file or instCountLim_ < ~uint64_t(0) or instFreq_ or enableTriggers_ or
-      enableCounters_ or enableGdb_)
-    {
-      URV address = ~URV(0);  // Invalid stop PC.
-      return runUntilAddress(address, file);
-    }
+  // To run fast, this method does not do much besides
+  // straight-forward execution. If any option is turned on, we switch
+  // to runUntilAdress which supports all features.
+  bool hasWideLdSt = csRegs_.getImplementedCsr(CsrNumber::MDBAC) != nullptr;
+  bool complex = ( file or instCountLim_ < ~uint64_t(0) or instFreq_ or
+		   enableTriggers_ or enableCounters_ or enableGdb_ or
+		   hasWideLdSt );
+  if (complex)
+    return runUntilAddress(~URV(0), file); // ~URV(0): No-stop PC.
+
+  uint64_t counter0 = instCounter_;
 
   struct timeval t0;
   gettimeofday(&t0, nullptr);
+  userOk = true;
 
 #ifdef __MINGW64__
   __p_sig_fn_t oldAction = nullptr;
   __p_sig_fn_t newAction = keyboardInterruptHandler;
 
-  userOk = true;
   oldAction = signal(SIGINT, newAction);
-
   bool success = simpleRun();
-
   signal(SIGINT, oldAction);
 #else
   struct sigaction oldAction;
@@ -3325,11 +3479,8 @@ Core<URV>::run(FILE* file)
   memset(&newAction, 0, sizeof(newAction));
   newAction.sa_handler = keyboardInterruptHandler;
 
-  userOk = true;
   sigaction(SIGINT, &newAction, &oldAction);
-
   bool success = simpleRun();
-
   sigaction(SIGINT, &oldAction, nullptr);
 #endif
 
@@ -3339,22 +3490,23 @@ Core<URV>::run(FILE* file)
   double elapsed = (double(t1.tv_sec - t0.tv_sec) +
                     double(t1.tv_usec - t0.tv_usec)*1e-6);
 
-  reportInstsPerSec(retiredInsts_, elapsed, not userOk);
-
+  uint64_t numInsts = instCounter_ - counter0;
+  reportInstsPerSec(numInsts, elapsed, not userOk);
   return success;
 }
 
 
 template <typename URV>
 bool
-Core<URV>::isInterruptPossible(InterruptCause& cause)
+Hart<URV>::isInterruptPossible(InterruptCause& cause)
 {
   if (debugMode_ and not debugStepMode_)
     return false;
 
   URV mstatus;
+  bool debugMode = false; // While single-steppin we are not in debug mode.
   if (not csRegs_.read(CsrNumber::MSTATUS, PrivilegeMode::Machine,
-                       debugMode_, mstatus))
+		       debugMode, mstatus))
     return false;
 
   MstatusFields<URV> fields(mstatus);
@@ -3362,9 +3514,9 @@ Core<URV>::isInterruptPossible(InterruptCause& cause)
     return false;
 
   URV mip, mie;
-  if (csRegs_.read(CsrNumber::MIP, PrivilegeMode::Machine, debugMode_, mip)
+  if (csRegs_.read(CsrNumber::MIP, PrivilegeMode::Machine, debugMode, mip)
       and
-      csRegs_.read(CsrNumber::MIE, PrivilegeMode::Machine, debugMode_, mie))
+      csRegs_.read(CsrNumber::MIE, PrivilegeMode::Machine, debugMode, mie))
     {
 
 #ifdef __EMSCRIPTEN__
@@ -3415,7 +3567,7 @@ Core<URV>::isInterruptPossible(InterruptCause& cause)
 
 template <typename URV>
 bool
-Core<URV>::processExternalInterrupt(FILE* traceFile, std::string& instStr)
+Hart<URV>::processExternalInterrupt(FILE* traceFile, std::string& instStr)
 {
   if (debugStepMode_ and not dcsrStepIe_)
     return false;
@@ -3429,7 +3581,7 @@ Core<URV>::processExternalInterrupt(FILE* traceFile, std::string& instStr)
       uint32_t inst = 0; // Load interrupted inst.
       readInst(currPc_, inst);
       if (traceFile)  // Trace interrupted instruction.
-        printInstTrace(inst, counter_, instStr, traceFile, true);
+	printInstTrace(inst, instCounter_, instStr, traceFile, true);
       return true;
     }
 
@@ -3442,7 +3594,7 @@ Core<URV>::processExternalInterrupt(FILE* traceFile, std::string& instStr)
       uint32_t inst = 0; // Load interrupted inst.
       readInst(currPc_, inst);
       if (traceFile)  // Trace interrupted instruction.
-        printInstTrace(inst, counter_, instStr, traceFile, true);
+	printInstTrace(inst, instCounter_, instStr, traceFile, true);
       ++cycleCount_;
       return true;
     }
@@ -3452,7 +3604,7 @@ Core<URV>::processExternalInterrupt(FILE* traceFile, std::string& instStr)
 
 template <typename URV>
 void
-Core<URV>::invalidateDecodeCache(URV addr, unsigned storeSize)
+Hart<URV>::invalidateDecodeCache(URV addr, unsigned storeSize)
 {
   // Consider putting this in a callback associated with memory
   // write/poke. This way it can be applied only to pages marked
@@ -3474,28 +3626,9 @@ Core<URV>::invalidateDecodeCache(URV addr, unsigned storeSize)
 }
 
 
-/// Return true if given core is in debug mode and the stop count bit of
-/// the DSCR register is set.
-template <typename URV>
-bool
-isDebugModeStopCount(const Core<URV>& core)
-{
-  if (not core.inDebugMode())
-    return false;
-
-  URV dcsrVal = 0;
-  if (not core.peekCsr(CsrNumber::DCSR, dcsrVal))
-    return false;
-
-  if ((dcsrVal >> 10) & 1)
-    return true;  // stop count bit is set
-  return false;
-}
-
-
 template <typename URV>
 void
-Core<URV>::singleStep(FILE* traceFile)
+Hart<URV>::singleStep(FILE* traceFile)
 {
   std::string instStr;
 
@@ -3515,7 +3648,7 @@ Core<URV>::singleStep(FILE* traceFile)
       hasException_ = false;
       ebreakInstDebug_ = false;
 
-      ++counter_;
+      ++instCounter_;
 
       if (processExternalInterrupt(traceFile, instStr))
         return;  // Next instruction in interrupt handler.
@@ -3538,14 +3671,14 @@ Core<URV>::singleStep(FILE* traceFile)
       else
         fetchOk = fetchInst(pc_, inst);
       if (not fetchOk)
-        {
-          ++cycleCount_;
-          if (traceFile)
-            printInstTrace(inst, counter_, instStr, traceFile);
-          if (dcsrStep_)
-            enterDebugMode(DebugModeCause::STEP, pc_);
-          return; // Next instruction in trap handler
-        }
+	{
+	  ++cycleCount_;
+	  if (traceFile)
+	    printInstTrace(inst, instCounter_, instStr, traceFile);
+	  if (dcsrStep_)
+	    enterDebugMode(DebugModeCause::STEP, pc_);
+	  return; // Next instruction in trap handler
+	}
 
       // Process pre-execute opcode trigger.
       if (hasTrig and instOpcodeTriggerHit(inst, TriggerTiming::Before,
@@ -3561,39 +3694,44 @@ Core<URV>::singleStep(FILE* traceFile)
       pc_ += di.instSize();
       execute(&di);
 
-      if (doingWide)
-        enableWideLdStMode(false);
-
       ++cycleCount_;
 
+      // A ld/st must be seen within 2 steps of a forced access fault.
+      if (forceAccessFail_ and (instCounter_ > forceAccessFailMark_ + 1))
+	{
+	  std::cerr << "Spurious exception command from test-bench.\n";
+	  forceAccessFail_ = false;
+	}
+
       if (hasException_)
-        {
-          if (doStats)
-            accumulateInstructionStats(di);
-          if (traceFile)
-            printInstTrace(inst, counter_, instStr, traceFile);
-          if (dcsrStep_ and not ebreakInstDebug_)
-            enterDebugMode(DebugModeCause::STEP, pc_);
-          return;
-        }
+	{
+	  if (doStats)
+	    accumulateInstructionStats(di);
+	  if (traceFile)
+	    printInstTrace(inst, instCounter_, instStr, traceFile);
+	  if (dcsrStep_ and not ebreakInstDebug_)
+	    enterDebugMode(DebugModeCause::STEP, pc_);
+	  return;
+	}
 
       if (triggerTripped_)
-        {
-          undoForTrigger();
-          takeTriggerAction(traceFile, currPc_, currPc_, counter_, true);
-          return;
-        }
+	{
+	  undoForTrigger();
+	  takeTriggerAction(traceFile, currPc_, currPc_, instCounter_, true);
+	  return;
+	}
 
-      if (not isDebugModeStopCount(*this))
-        ++retiredInsts_;
-      else if (not ebreakInstDebug_)
-        ++retiredInsts_;
+      if (doingWide)
+	enableWideLdStMode(false);
+
+      if (not ebreakInstDebug_)
+	++retiredInsts_;
 
       if (doStats)
         accumulateInstructionStats(di);
 
       if (traceFile)
-        printInstTrace(inst, counter_, instStr, traceFile);
+	printInstTrace(inst, instCounter_, instStr, traceFile);
 
       // If a register is used as a source by an instruction then any
       // pending load with same register as target is removed from the
@@ -3620,10 +3758,10 @@ Core<URV>::singleStep(FILE* traceFile)
       bool icountHit = (enableTriggers_ and isInterruptEnabled() and
                         icountTriggerHit());
       if (icountHit)
-        {
-          takeTriggerAction(traceFile, pc_, pc_, counter_, false);
-          return;
-        }
+	{
+	  takeTriggerAction(traceFile, pc_, pc_, instCounter_, false);
+	  return;
+	}
 
       // If step bit set in dcsr then enter debug mode unless already there.
       if (dcsrStep_ and not ebreakInstDebug_)
@@ -3632,31 +3770,25 @@ Core<URV>::singleStep(FILE* traceFile)
 #ifndef DISABLE_EXCEPTIONS
   catch (const CoreException& ce)
     {
-      uint32_t inst = 0;
-      readInst(currPc_, inst);
-      if (ce.type() == CoreException::Stop)
-        {
-          if (traceFile)
-            printInstTrace(inst, counter_, instStr, traceFile);
-          std::cerr << "Stopped...\n";
-          setTargetProgramFinished(true);
-        }
-      else if (ce.type() == CoreException::Exit)
-        {
-          std::lock_guard<std::mutex> guard(printInstTraceMutex);
-          std::cerr << "Target program exited with code " << ce.value() << '\n';
-          setTargetProgramFinished(true);
-        }
-      else
-        std::cerr << "Unexpected exception\n";
+      logStop(ce, instCounter_, traceFile);
     }
 #endif
 }
 
 
 template <typename URV>
+void
+Hart<URV>::postDataAccessFault(URV offset)
+{
+  forceAccessFail_ = true;
+  forceAccessFailOffset_ = offset;
+  forceAccessFailMark_ = instCounter_;
+}
+
+
+template <typename URV>
 bool
-Core<URV>::whatIfSingleStep(uint32_t inst, ChangeRecord& record)
+Hart<URV>::whatIfSingleStep(uint32_t inst, ChangeRecord& record)
 {
   uint64_t prevExceptionCount = exceptionCount_;
   URV prevPc = pc_;
@@ -3690,7 +3822,7 @@ Core<URV>::whatIfSingleStep(uint32_t inst, ChangeRecord& record)
 
 template <typename URV>
 bool
-Core<URV>::whatIfSingleStep(URV whatIfPc, uint32_t inst, ChangeRecord& record)
+Hart<URV>::whatIfSingleStep(URV whatIfPc, uint32_t inst, ChangeRecord& record)
 {
   URV prevPc = pc_;
   pc_ = whatIfPc;
@@ -3718,18 +3850,18 @@ Core<URV>::whatIfSingleStep(URV whatIfPc, uint32_t inst, ChangeRecord& record)
 
 template <typename URV>
 bool
-Core<URV>::whatIfSingStep(const DecodedInst& di, ChangeRecord& record)
+Hart<URV>::whatIfSingStep(const DecodedInst& di, ChangeRecord& record)
 {
+  clearTraceData();
   uint64_t prevExceptionCount = exceptionCount_;
-  URV prevPc  = pc_;
+  URV prevPc  = pc_, prevCurrPc = currPc_;
 
-  pc_ = di.address();
+  currPc_ = pc_ = di.address();
 
   // Note: triggers not yet supported.
   triggerTripped_ = false;
 
-  // Temporarily transfer operand values to corresponding registers
-  // recording previous value of registers.
+  // Save current value of operands.
   uint64_t prevRegValues[4];
   for (unsigned i = 0; i < 4; ++i)
     {
@@ -3738,30 +3870,50 @@ Core<URV>::whatIfSingStep(const DecodedInst& di, ChangeRecord& record)
       uint32_t operand = di.ithOperand(i);
 
       switch (di.ithOperandType(i))
-        {
-        case OperandType::None:
-        case OperandType::Imm:
-          break;
-        case OperandType::IntReg:
-          peekIntReg(operand, prev);
-          prevRegValues[i] = prev;
-          pokeIntReg(operand, di.ithOperandValue(i));
-          break;
-        case OperandType::FpReg:
-          peekFpReg(operand, prevRegValues[i]);
-          pokeFpReg(operand, di.ithOperandValue(i));
-          break;
-        case OperandType::CsReg:
-          peekCsr(CsrNumber(operand), prev);
-          prevRegValues[i] = prev;
-          pokeCsr(CsrNumber(operand), di.ithOperandValue(i));
-          break;
-        }
+	{
+	case OperandType::None:
+	case OperandType::Imm:
+	  break;
+	case OperandType::IntReg:
+	  peekIntReg(operand, prev);
+	  prevRegValues[i] = prev;
+	  break;
+	case OperandType::FpReg:
+	  peekFpReg(operand, prevRegValues[i]);
+	  break;
+	case OperandType::CsReg:
+	  peekCsr(CsrNumber(operand), prev);
+	  prevRegValues[i] = prev;
+	  break;
+	}
+    }
+
+  // Temporarily set value of operands to what-if values.
+  for (unsigned i = 0; i < 4; ++i)
+    {
+      uint32_t operand = di.ithOperand(i);
+
+      switch (di.ithOperandType(i))
+	{
+	case OperandType::None:
+	case OperandType::Imm:
+	  break;
+	case OperandType::IntReg:
+	  pokeIntReg(operand, di.ithOperandValue(i));
+	  break;
+	case OperandType::FpReg:
+	  pokeFpReg(operand, di.ithOperandValue(i));
+	  break;
+	case OperandType::CsReg:
+	  pokeCsr(CsrNumber(operand), di.ithOperandValue(i));
+	  break;
+	}
     }
 
   // Execute instruction.
   pc_ += di.instSize();
-  execute(&di);
+  if(di.instEntry()->instId() != InstId::illegal)
+	  execute(&di);
   bool result = exceptionCount_ == prevExceptionCount;
 
   // Collect changes. Undo each collected change.
@@ -3791,13 +3943,15 @@ Core<URV>::whatIfSingStep(const DecodedInst& di, ChangeRecord& record)
     }
 
   pc_ = prevPc;
+  currPc_ = prevCurrPc;
+
   return result;
 }
 
 
 template <typename URV>
 void
-Core<URV>::collectAndUndoWhatIfChanges(URV prevPc, ChangeRecord& record)
+Hart<URV>::collectAndUndoWhatIfChanges(URV prevPc, ChangeRecord& record)
 {
   record.clear();
 
@@ -3829,7 +3983,8 @@ Core<URV>::collectAndUndoWhatIfChanges(URV prevPc, ChangeRecord& record)
       record.fpRegValue = newFpValue;
     }
 
-  record.memSize = memory_.getLastWriteNewValue(record.memAddr, record.memValue);
+  record.memSize = memory_.getLastWriteNewValue(localHartId_, record.memAddr,
+                                                record.memValue);
 
   size_t addr = 0;
   uint64_t value = 0;
@@ -3866,7 +4021,22 @@ Core<URV>::collectAndUndoWhatIfChanges(URV prevPc, ChangeRecord& record)
 
 template <typename URV>
 void
-Core<URV>::execute(const DecodedInst* di)
+Hart<URV>::setInvalidInFcsr()
+{
+  URV val = 0;
+  if (csRegs_.read(CsrNumber::FCSR, PrivilegeMode::Machine, debugMode_, val))
+    {
+      URV prev = val;
+      val |= URV(FpFlags::Invalid);
+      if (val != prev)
+	csRegs_.write(CsrNumber::FCSR, PrivilegeMode::Machine, debugMode_, val);
+    }
+}
+
+
+template <typename URV>
+void
+Hart<URV>::execute(const DecodedInst* di)
 {
 #pragma GCC diagnostic ignored "-Wpedantic"
 
@@ -5057,7 +5227,7 @@ Core<URV>::execute(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::enableInstructionFrequency(bool b)
+Hart<URV>::enableInstructionFrequency(bool b)
 {
   instFreq_ = b;
   if (b)
@@ -5080,10 +5250,10 @@ Core<URV>::enableInstructionFrequency(bool b)
 
 template <typename URV>
 void
-Core<URV>::enterDebugMode(DebugModeCause cause, URV pc)
+Hart<URV>::enterDebugMode(DebugModeCause cause, URV pc)
 {
   // Entering debug modes loses LR reservation.
-  hasLr_ = false;
+  memory_.invalidateLr(localHartId_);
 
   if (debugMode_)
     {
@@ -5116,8 +5286,15 @@ Core<URV>::enterDebugMode(DebugModeCause cause, URV pc)
 
 template <typename URV>
 void
-Core<URV>::enterDebugMode(URV pc)
+Hart<URV>::enterDebugMode(URV pc)
 {
+  if (forceAccessFail_)
+    {
+      std::cerr << "Entering debug mode with a pending forced exception from"
+		<< " test-bench. Exception cleared.\n";
+      forceAccessFail_ = false;
+    }
+
   // This method is used by the test-bench to make the simulator
   // follow it into debug-halt or debug-stop mode. Do nothing if the
   // simulator got into debug mode on its own.
@@ -5125,7 +5302,7 @@ Core<URV>::enterDebugMode(URV pc)
     return;   // Already in debug mode.
 
   if (debugStepMode_)
-    std::cerr << "Error: Enter-debug command finds core in debug-step mode.\n";
+    std::cerr << "Error: Enter-debug command finds hart in debug-step mode.\n";
 
   debugStepMode_ = false;
   debugMode_ = false;
@@ -5136,7 +5313,7 @@ Core<URV>::enterDebugMode(URV pc)
 
 template <typename URV>
 void
-Core<URV>::exitDebugMode()
+Hart<URV>::exitDebugMode()
 {
   if (not debugMode_)
     {
@@ -5158,7 +5335,8 @@ Core<URV>::exitDebugMode()
         debugMode_ = false;
     }
 
-  // If pending nmi bit is set in dcsr, set pending nmi in core
+  // If pending nmi bit is set in dcsr, set pending nmi in the hart
+  // object.
   URV dcsrVal = 0;
   if (not peekCsr(CsrNumber::DCSR, dcsrVal))
     std::cerr << "Error: Failed to read DCSR in exit debug.\n";
@@ -5170,7 +5348,7 @@ Core<URV>::exitDebugMode()
 
 template <typename URV>
 void
-Core<URV>::execBlt(const DecodedInst* di)
+Hart<URV>::execBlt(const DecodedInst* di)
 {
   SRV v1 = intRegs_.read(di->op0()),  v2 = intRegs_.read(di->op1());
   if (v1 < v2)
@@ -5184,7 +5362,7 @@ Core<URV>::execBlt(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execBltu(const DecodedInst* di)
+Hart<URV>::execBltu(const DecodedInst* di)
 {
   URV v1 = intRegs_.read(di->op0()),  v2 = intRegs_.read(di->op1());
   if (v1 < v2)
@@ -5198,7 +5376,7 @@ Core<URV>::execBltu(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execBge(const DecodedInst* di)
+Hart<URV>::execBge(const DecodedInst* di)
 {
   SRV v1 = intRegs_.read(di->op0()),  v2 = intRegs_.read(di->op1());
   if (v1 >= v2)
@@ -5212,7 +5390,7 @@ Core<URV>::execBge(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execBgeu(const DecodedInst* di)
+Hart<URV>::execBgeu(const DecodedInst* di)
 {
   URV v1 = intRegs_.read(di->op0()),  v2 = intRegs_.read(di->op1());
   if (v1 >= v2)
@@ -5226,7 +5404,7 @@ Core<URV>::execBgeu(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execJalr(const DecodedInst* di)
+Hart<URV>::execJalr(const DecodedInst* di)
 {
   URV temp = pc_;  // pc has the address of the instruction after jalr
   pc_ = (intRegs_.read(di->op1()) + SRV(di->op2AsInt()));
@@ -5238,7 +5416,7 @@ Core<URV>::execJalr(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execJal(const DecodedInst* di)
+Hart<URV>::execJal(const DecodedInst* di)
 {
   intRegs_.write(di->op0(), pc_);
   pc_ = currPc_ + SRV(int32_t(di->op1()));
@@ -5249,7 +5427,7 @@ Core<URV>::execJal(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execLui(const DecodedInst* di)
+Hart<URV>::execLui(const DecodedInst* di)
 {
   intRegs_.write(di->op0(), SRV(int32_t(di->op1())));
 }
@@ -5257,7 +5435,7 @@ Core<URV>::execLui(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAuipc(const DecodedInst* di)
+Hart<URV>::execAuipc(const DecodedInst* di)
 {
   intRegs_.write(di->op0(), currPc_ + SRV(int32_t(di->op1())));
 }
@@ -5265,15 +5443,11 @@ Core<URV>::execAuipc(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSlli(const DecodedInst* di)
+Hart<URV>::execSlli(const DecodedInst* di)
 {
   int32_t amount = di->op2AsInt();
-
-  if ((amount & 0x20) and not rv64_)
-    {
-      illegalInst();  // Bit 5 of shift amount cannot be one in 32-bit.
-      return;
-    }
+  if (not checkShiftImmediate(amount))
+    return;
 
   URV v = intRegs_.read(di->op1()) << amount;
   intRegs_.write(di->op0(), v);
@@ -5282,7 +5456,7 @@ Core<URV>::execSlli(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSlti(const DecodedInst* di)
+Hart<URV>::execSlti(const DecodedInst* di)
 {
   SRV imm = di->op2AsInt();
   URV v = SRV(intRegs_.read(di->op1())) < imm ? 1 : 0;
@@ -5292,7 +5466,7 @@ Core<URV>::execSlti(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSltiu(const DecodedInst* di)
+Hart<URV>::execSltiu(const DecodedInst* di)
 {
   URV imm = di->op2();
   URV v = intRegs_.read(di->op1()) < imm ? 1 : 0;
@@ -5302,7 +5476,7 @@ Core<URV>::execSltiu(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execXori(const DecodedInst* di)
+Hart<URV>::execXori(const DecodedInst* di)
 {
   URV v = intRegs_.read(di->op1()) ^ SRV(di->op2AsInt());
   intRegs_.write(di->op0(), v);
@@ -5311,7 +5485,7 @@ Core<URV>::execXori(const DecodedInst* di)
 
 template <typename URV>
 bool
-Core<URV>::checkShiftImmediate(URV imm)
+Hart<URV>::checkShiftImmediate(URV imm)
 {
   if (isRv64())
     {
@@ -5334,7 +5508,7 @@ Core<URV>::checkShiftImmediate(URV imm)
 
 template <typename URV>
 void
-Core<URV>::execSrli(const DecodedInst* di)
+Hart<URV>::execSrli(const DecodedInst* di)
 {
   URV amount(di->op2());
   if (not checkShiftImmediate(amount))
@@ -5347,7 +5521,7 @@ Core<URV>::execSrli(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSrai(const DecodedInst* di)
+Hart<URV>::execSrai(const DecodedInst* di)
 {
   uint32_t amount(di->op2());
   if (not checkShiftImmediate(amount))
@@ -5360,7 +5534,7 @@ Core<URV>::execSrai(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execOri(const DecodedInst* di)
+Hart<URV>::execOri(const DecodedInst* di)
 {
   URV v = intRegs_.read(di->op1()) | SRV(di->op2AsInt());
   intRegs_.write(di->op0(), v);
@@ -5369,7 +5543,7 @@ Core<URV>::execOri(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSub(const DecodedInst* di)
+Hart<URV>::execSub(const DecodedInst* di)
 {
   URV v = intRegs_.read(di->op1()) - intRegs_.read(di->op2());
   intRegs_.write(di->op0(), v);
@@ -5378,7 +5552,7 @@ Core<URV>::execSub(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSll(const DecodedInst* di)
+Hart<URV>::execSll(const DecodedInst* di)
 {
   URV mask = intRegs_.shiftMask();
   URV v = intRegs_.read(di->op1()) << (intRegs_.read(di->op2()) & mask);
@@ -5388,7 +5562,7 @@ Core<URV>::execSll(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSlt(const DecodedInst* di)
+Hart<URV>::execSlt(const DecodedInst* di)
 {
   SRV v1 = intRegs_.read(di->op1());
   SRV v2 = intRegs_.read(di->op2());
@@ -5399,7 +5573,7 @@ Core<URV>::execSlt(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSltu(const DecodedInst* di)
+Hart<URV>::execSltu(const DecodedInst* di)
 {
   URV v1 = intRegs_.read(di->op1());
   URV v2 = intRegs_.read(di->op2());
@@ -5410,7 +5584,7 @@ Core<URV>::execSltu(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execXor(const DecodedInst* di)
+Hart<URV>::execXor(const DecodedInst* di)
 {
   URV v = intRegs_.read(di->op1()) ^ intRegs_.read(di->op2());
   intRegs_.write(di->op0(), v);
@@ -5419,7 +5593,7 @@ Core<URV>::execXor(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSrl(const DecodedInst* di)
+Hart<URV>::execSrl(const DecodedInst* di)
 {
   URV mask = intRegs_.shiftMask();
   URV v = intRegs_.read(di->op1()) >> (intRegs_.read(di->op2()) & mask);
@@ -5429,7 +5603,7 @@ Core<URV>::execSrl(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSra(const DecodedInst* di)
+Hart<URV>::execSra(const DecodedInst* di)
 {
   URV mask = intRegs_.shiftMask();
   URV v = SRV(intRegs_.read(di->op1())) >> (intRegs_.read(di->op2()) & mask);
@@ -5439,7 +5613,7 @@ Core<URV>::execSra(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execOr(const DecodedInst* di)
+Hart<URV>::execOr(const DecodedInst* di)
 {
   URV v = intRegs_.read(di->op1()) | intRegs_.read(di->op2());
   intRegs_.write(di->op0(), v);
@@ -5448,7 +5622,7 @@ Core<URV>::execOr(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAnd(const DecodedInst* di)
+Hart<URV>::execAnd(const DecodedInst* di)
 {
   URV v = intRegs_.read(di->op1()) & intRegs_.read(di->op2());
   intRegs_.write(di->op0(), v);
@@ -5457,16 +5631,15 @@ Core<URV>::execAnd(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execFence(const DecodedInst*)
+Hart<URV>::execFence(const DecodedInst*)
 {
-  storeQueue_.clear();
   loadQueue_.clear();
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFencei(const DecodedInst*)
+Hart<URV>::execFencei(const DecodedInst*)
 {
   return;  // Currently a no-op.
 }
@@ -5474,17 +5647,40 @@ Core<URV>::execFencei(const DecodedInst*)
 
 template <typename URV>
 bool
-Core<URV>::validateAmoAddr(URV addr, unsigned accessSize)
+Hart<URV>::validateAmoAddr(uint32_t rs1, URV addr, unsigned accessSize)
 {
   URV mask = URV(accessSize) - 1;
 
-  /// Address must be word aligned for word access and double-word
-  /// aligned for double-word access.
+  SecondaryCause secCause = SecondaryCause::NONE;
+  auto cause = ExceptionCause::NONE;
+  if (accessSize == 4)
+    {
+      uint32_t dummy = 0;
+      cause = determineStoreException(rs1, addr, addr, dummy, secCause);
+    }
+  else
+    {
+      uint64_t dummy = 0;
+      cause = determineStoreException(rs1, addr, addr, dummy, secCause);
+    }
+
+  if (cause != ExceptionCause::NONE)
+    {
+      initiateStoreException(cause, addr, secCause);
+      return false;
+    }
+
+  // Address must be word aligned for word access and double-word
+  // aligned for double-word access.
   if (addr & mask)
     {
       // Per spec cause is store-access-fault.
       if (not triggerTripped_)
-        initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
+	{
+	  auto cause = ExceptionCause::STORE_ACC_FAULT;
+	  auto secCause = SecondaryCause::STORE_ACC_AMO;
+	  initiateStoreException(cause, addr, secCause);
+	}
       return false;
     }
 
@@ -5492,7 +5688,11 @@ Core<URV>::validateAmoAddr(URV addr, unsigned accessSize)
     {
       // Per spec cause is store-access-fault.
       if (not triggerTripped_)
-        initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
+	{
+	  auto cause = ExceptionCause::STORE_ACC_FAULT;
+	  auto secCause = SecondaryCause::STORE_ACC_AMO;
+	  initiateStoreException(cause, addr, secCause);
+	}
       return false;
     }
 
@@ -5502,7 +5702,7 @@ Core<URV>::validateAmoAddr(URV addr, unsigned accessSize)
 
 template <typename URV>
 bool
-Core<URV>::amoLoad32(uint32_t rs1, URV& value)
+Hart<URV>::amoLoad32(uint32_t rs1, URV& value)
 {
   URV addr = intRegs_.read(rs1);
 
@@ -5514,28 +5714,32 @@ Core<URV>::amoLoad32(uint32_t rs1, URV& value)
 
   unsigned ldSize = 4;
 
-  if (not validateAmoAddr(addr, ldSize))
+  if (not validateAmoAddr(rs1, addr, ldSize))
     {
       forceAccessFail_ = false;
       return false;
     }
 
+  auto cause2 = SecondaryCause::NONE;
+  if (forceAccessFail_)
+    initiateLoadException(ExceptionCause::STORE_ACC_FAULT, addr, cause2);
+
   uint32_t uval = 0;
-  if (not forceAccessFail_ and memory_.read(addr, uval))
+  if (memory_.read(addr, uval))
     {
       value = SRV(int32_t(uval)); // Sign extend.
       return true;  // Success.
     }
 
-  // Either force-fail or load failed. Take exception.
-  initiateLoadException(ExceptionCause::STORE_ACC_FAULT, addr, ldSize);
+  cause2 = SecondaryCause::STORE_ACC_AMO;
+  initiateLoadException(ExceptionCause::STORE_ACC_FAULT, addr, cause2);
   return false;
 }
 
 
 template <typename URV>
 bool
-Core<URV>::amoLoad64(uint32_t rs1, URV& value)
+Hart<URV>::amoLoad64(uint32_t rs1, URV& value)
 {
   URV addr = intRegs_.read(rs1);
 
@@ -5547,39 +5751,35 @@ Core<URV>::amoLoad64(uint32_t rs1, URV& value)
 
   unsigned ldSize = 8;
 
-  if (not validateAmoAddr(addr, ldSize))
+  if (not validateAmoAddr(rs1, addr, ldSize))
     {
       forceAccessFail_ = false;
       return false;
     }
 
   uint64_t uval = 0;
-  if (not forceAccessFail_ and memory_.read(addr, uval))
+  if (memory_.read(addr, uval))
     {
       value = SRV(int64_t(uval)); // Sign extend.
       return true;  // Success.
     }
 
-  // Either force-fail or load failed. Take exception.
-  initiateLoadException(ExceptionCause::STORE_ACC_FAULT, addr, ldSize);
+  auto secCause = SecondaryCause::STORE_ACC_AMO;
+  initiateLoadException(ExceptionCause::STORE_ACC_FAULT, addr, secCause);
   return false;
 }
 
 
 template <typename URV>
 void
-Core<URV>::execEcall(const DecodedInst*)
+Hart<URV>::execEcall(const DecodedInst*)
 {
   if (triggerTripped_)
     return;
 
-  // We do not update minstret on exceptions but it should be
-  // updated for an ecall. Compensate.
-  ++retiredInsts_;
-
-  if (newlib_)
+  if (newlib_ or linux_)
     {
-      URV a0 = emulateNewlib();
+      URV a0 = emulateSyscall();
       intRegs_.write(RegA0, a0);
       URV num = intRegs_.read(RegA7);
 #ifdef DISABLE_EXCEPTIONS
@@ -5591,21 +5791,22 @@ Core<URV>::execEcall(const DecodedInst*)
       return;
     }
 
+  auto secCause = SecondaryCause::NONE;
+
   if (privMode_ == PrivilegeMode::Machine)
-    initiateException(ExceptionCause::M_ENV_CALL, currPc_, 0);
+    initiateException(ExceptionCause::M_ENV_CALL, currPc_, 0, secCause);
   else if (privMode_ == PrivilegeMode::Supervisor)
-    initiateException(ExceptionCause::S_ENV_CALL, currPc_, 0);
+    initiateException(ExceptionCause::S_ENV_CALL, currPc_, 0, secCause);
   else if (privMode_ == PrivilegeMode::User)
-    initiateException(ExceptionCause::U_ENV_CALL, currPc_, 0);
+    initiateException(ExceptionCause::U_ENV_CALL, currPc_, 0, secCause);
   else
     assert(0 and "Invalid privilege mode in execEcall");
-
 }
 
 
 template <typename URV>
 void
-Core<URV>::execEbreak(const DecodedInst*)
+Hart<URV>::execEbreak(const DecodedInst*)
 {
   if (triggerTripped_)
     return;
@@ -5628,14 +5829,12 @@ Core<URV>::execEbreak(const DecodedInst*)
         }
     }
 
-  // We do not update minstret on exceptions but it should be
-  // updated for an ebreak. Compensate.
-  ++retiredInsts_;
-
   URV savedPc = currPc_;  // Goes into MEPC.
   URV trapInfo = currPc_;  // Goes into MTVAL.
 
-  initiateException(ExceptionCause::BREAKP, savedPc, trapInfo);
+  auto cause = ExceptionCause::BREAKP;
+  auto secCause = SecondaryCause::NONE;
+  initiateException(cause, savedPc, trapInfo, secCause);
 
   if (enableGdb_)
     {
@@ -5648,7 +5847,7 @@ Core<URV>::execEbreak(const DecodedInst*)
 
 template <typename URV>
 void
-Core<URV>::execMret(const DecodedInst*)
+Hart<URV>::execMret(const DecodedInst*)
 {
   if (privMode_ < PrivilegeMode::Machine)
     {
@@ -5668,7 +5867,7 @@ Core<URV>::execMret(const DecodedInst*)
       return;
     }
 
-  hasLr_ = false;  // Clear LR reservation (if any).
+  memory_.invalidateLr(localHartId_); // Clear LR reservation (if any).
 
   // ... updating/unpacking its fields,
   MstatusFields<URV> fields(value);
@@ -5697,7 +5896,7 @@ Core<URV>::execMret(const DecodedInst*)
 
 template <typename URV>
 void
-Core<URV>::execSret(const DecodedInst*)
+Hart<URV>::execSret(const DecodedInst*)
 {
   if (not isRvs())
     {
@@ -5756,7 +5955,7 @@ Core<URV>::execSret(const DecodedInst*)
 
 template <typename URV>
 void
-Core<URV>::execUret(const DecodedInst*)
+Hart<URV>::execUret(const DecodedInst*)
 {
   if (not isRvu())
     {
@@ -5808,7 +6007,7 @@ Core<URV>::execUret(const DecodedInst*)
 
 template <typename URV>
 void
-Core<URV>::execWfi(const DecodedInst*)
+Hart<URV>::execWfi(const DecodedInst*)
 {
   return;   // Currently implemented as a no-op.
 }
@@ -5816,9 +6015,9 @@ Core<URV>::execWfi(const DecodedInst*)
 
 template <typename URV>
 bool
-Core<URV>::doCsrRead(CsrNumber csr, URV& value)
+Hart<URV>::doCsrRead(CsrNumber csr, URV& value)
 {
-  if (csRegs_.read(csr, privMode_, debugMode_, value))
+  if (csRegs_.read(csr, privMode_, false /* debugMode */, value))
     return true;
 
   illegalInst();
@@ -5828,7 +6027,7 @@ Core<URV>::doCsrRead(CsrNumber csr, URV& value)
 
 template <typename URV>
 void
-Core<URV>::updateStackChecker()
+Hart<URV>::updateStackChecker()
 {  
   Csr<URV>* csr = csRegs_.getImplementedCsr(CsrNumber::MSPCBA);
   if (csr)
@@ -5846,10 +6045,10 @@ Core<URV>::updateStackChecker()
 
 template <typename URV>
 void
-Core<URV>::doCsrWrite(CsrNumber csr, URV csrVal, unsigned intReg,
-                      URV intRegVal)
+Hart<URV>::doCsrWrite(CsrNumber csr, URV csrVal, unsigned intReg,
+		      URV intRegVal)
 {
-  if (not csRegs_.isWriteable(csr, privMode_, debugMode_))
+  if (not csRegs_.isWriteable(csr, privMode_, false /*debugMode*/))
     {
       illegalInst();
       return;
@@ -5862,7 +6061,7 @@ Core<URV>::doCsrWrite(CsrNumber csr, URV csrVal, unsigned intReg,
     cycleCount_++;
 
   // Update CSR and integer register.
-  csRegs_.write(csr, privMode_, debugMode_, csrVal);
+  csRegs_.write(csr, privMode_, false /*debugMode*/, csrVal);
   intRegs_.write(intReg, intRegVal);
 
   if (csr == CsrNumber::DCSR)
@@ -5898,7 +6097,7 @@ Core<URV>::doCsrWrite(CsrNumber csr, URV csrVal, unsigned intReg,
 // (op1) and save its original value in register rd (op0).
 template <typename URV>
 void
-Core<URV>::execCsrrw(const DecodedInst* di)
+Hart<URV>::execCsrrw(const DecodedInst* di)
 {
   if (triggerTripped_)
     return;
@@ -5917,7 +6116,7 @@ Core<URV>::execCsrrw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execCsrrs(const DecodedInst* di)
+Hart<URV>::execCsrrs(const DecodedInst* di)
 {
   if (triggerTripped_)
     return;
@@ -5941,7 +6140,7 @@ Core<URV>::execCsrrs(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execCsrrc(const DecodedInst* di)
+Hart<URV>::execCsrrc(const DecodedInst* di)
 {
   if (triggerTripped_)
     return;
@@ -5965,7 +6164,7 @@ Core<URV>::execCsrrc(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execCsrrwi(const DecodedInst* di)
+Hart<URV>::execCsrrwi(const DecodedInst* di)
 {
   if (triggerTripped_)
     return;
@@ -5983,7 +6182,7 @@ Core<URV>::execCsrrwi(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execCsrrsi(const DecodedInst* di)
+Hart<URV>::execCsrrsi(const DecodedInst* di)
 {
   if (triggerTripped_)
     return;
@@ -6009,7 +6208,7 @@ Core<URV>::execCsrrsi(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execCsrrci(const DecodedInst* di)
+Hart<URV>::execCsrrci(const DecodedInst* di)
 {
   if (triggerTripped_)
     return;
@@ -6035,7 +6234,7 @@ Core<URV>::execCsrrci(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execLb(const DecodedInst* di)
+Hart<URV>::execLb(const DecodedInst* di)
 {
   load<int8_t>(di->op0(), di->op1(), di->op2AsInt());
 }
@@ -6043,7 +6242,7 @@ Core<URV>::execLb(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execLbu(const DecodedInst* di)
+Hart<URV>::execLbu(const DecodedInst* di)
 {
   load<uint8_t>(di->op0(), di->op1(), di->op2AsInt());
 }
@@ -6051,7 +6250,7 @@ Core<URV>::execLbu(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execLhu(const DecodedInst* di)
+Hart<URV>::execLhu(const DecodedInst* di)
 {
   load<uint16_t>(di->op0(), di->op1(), di->op2AsInt());
 }
@@ -6059,24 +6258,30 @@ Core<URV>::execLhu(const DecodedInst* di)
 
 template <typename URV>
 bool
-Core<URV>::wideStore(URV addr, URV storeVal, unsigned storeSize)
+Hart<URV>::wideStore(URV addr, URV storeVal, unsigned storeSize)
 {
-  if ((addr & 7) or storeSize != 4 or isAddressInDccm(addr))
+  if ((addr & 7) or storeSize != 4 or not isDataAddressExternal(addr))
     {
-      initiateLoadException(ExceptionCause::STORE_ACC_FAULT, addr, 8);
+      auto cause = ExceptionCause::STORE_ACC_FAULT;
+      auto secCause = SecondaryCause::STORE_ACC_64BIT;
+      initiateStoreException(cause, addr, secCause);
       return false;
     }
 
   uint32_t lower = storeVal;
-
   uint32_t upper = 0;
+
   auto csr = csRegs_.getImplementedCsr(CsrNumber::MDBHD);
   if (csr)
     upper = csr->read();
 
-  if (not memory_.write(addr + 4, upper) or not memory_.write(addr, lower))
+  if (not memory_.write(localHartId_, addr + 4, upper) or
+      not memory_.write(localHartId_, addr, lower))
     {
-      initiateLoadException(ExceptionCause::STORE_ACC_FAULT, addr, 8);
+      // FIX: Clear last written data if 1st 4 bytes written.
+      auto cause = ExceptionCause::STORE_ACC_FAULT;
+      auto secCause = SecondaryCause::STORE_ACC_64BIT;
+      initiateStoreException(cause, addr, secCause);
       return false;
     }
 
@@ -6086,26 +6291,100 @@ Core<URV>::wideStore(URV addr, URV storeVal, unsigned storeSize)
 
 template <typename URV>
 template <typename STORE_TYPE>
+ExceptionCause
+Hart<URV>::determineStoreException(unsigned rs1, URV base, URV addr,
+				   STORE_TYPE& storeVal,
+				   SecondaryCause& secCause)
+{
+  unsigned stSize = sizeof(STORE_TYPE);
+
+  // Misaligned store to io section causes an exception. Crossing
+  // dccm to non-dccm causes an exception.
+  constexpr unsigned alignMask = sizeof(STORE_TYPE) - 1;
+  bool misal = addr & alignMask;
+  misalignedLdSt_ = misal;
+  if (misal)
+    {
+      if (misalignedAccessCausesException(addr, stSize, secCause))
+	return ExceptionCause::STORE_ADDR_MISAL;
+    }
+
+  // Stack access.
+  if (rs1 == RegSp and checkStackAccess_ and ! checkStackStore(addr, stSize))
+    {
+      secCause = SecondaryCause::STORE_ACC_STACK_CHECK;
+      return ExceptionCause::STORE_ACC_FAULT;
+    }
+
+  // DCCM unmapped or out of MPU windows. Invalid PIC access handled later.
+  bool writeOk = memory_.checkWrite(addr, storeVal);
+  if (not writeOk and not memory_.isAddrInMappedRegs(addr))
+    {
+      secCause = SecondaryCause::STORE_ACC_MEM_PROTECTION;
+      size_t region = memory_.getRegionIndex(addr);
+      if (regionHasLocalDataMem_.at(region))
+	secCause = SecondaryCause::STORE_ACC_LOCAL_UNMAPPED;
+      return ExceptionCause::STORE_ACC_FAULT;
+    }
+
+  // 64-bit store
+  if (wideLdSt_)
+    {
+      bool fail = (addr & 7) or stSize != 4 or ! isDataAddressExternal(addr);
+      uint64_t val = 0;
+      fail = fail or ! memory_.checkWrite(addr, val);
+      if (fail)
+	{
+	  secCause = SecondaryCause::STORE_ACC_64BIT;
+	  return ExceptionCause::STORE_ACC_FAULT;
+	}
+    }
+
+  // Region predict (Effective address compatible with base).
+  if (eaCompatWithBase_ and effectiveAndBaseAddrMismatch(addr, base))
+    {
+      secCause = SecondaryCause::STORE_ACC_REGION_PREDICTION;
+      return ExceptionCause::STORE_ACC_FAULT;
+    }
+
+  // PIC access
+  if (memory_.isAddrInMappedRegs(addr) and not writeOk)
+    {
+      secCause = SecondaryCause::STORE_ACC_PIC;
+      return ExceptionCause::STORE_ACC_FAULT;
+    }
+
+  // Fault dictated by bench
+  if (forceAccessFail_)
+    {
+      secCause = SecondaryCause::STORE_ACC_DOUBLE_ECC;
+      return ExceptionCause::STORE_ACC_FAULT;
+    }
+
+  return ExceptionCause::NONE;
+}
+
+
+template <typename URV>
+template <typename STORE_TYPE>
 bool
-Core<URV>::store(URV base, URV addr, STORE_TYPE storeVal)
-{  
+Hart<URV>::store(unsigned rs1, URV base, URV addr, STORE_TYPE storeVal)
+{
+  std::lock_guard<std::mutex> lock(memory_.lrMutex_);
+
   // ld/st-address or instruction-address triggers have priority over
   // ld/st access or misaligned exceptions.
   bool hasTrig = hasActiveTrigger();
   TriggerTiming timing = TriggerTiming::Before;
-  bool isLoad = false;
-  if (hasTrig)
-    if (ldStAddrTriggerHit(addr, timing, isLoad, isInterruptEnabled()))
-      triggerTripped_ = true;
-
-  if (eaCompatWithBase_)
-    forceAccessFail_ = forceAccessFail_ or effectiveAndBaseAddrMismatch(addr, base);
+  bool isLd = false;  // Not a load.
+  if (hasTrig and ldStAddrTriggerHit(addr, timing, isLd, isInterruptEnabled()))
+    triggerTripped_ = true;
 
 #ifdef __EMSCRIPTEN__
   // MMIO for javascript
   if(addr > 0xffff0000){
     if (privMode_ == PrivilegeMode::User){
-      initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
+      initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr, SecondaryCause::NONE);
       return false;
     }
     jsWriteMMIO((int) addr, sizeof(STORE_TYPE), (int) storeVal);
@@ -6113,47 +6392,32 @@ Core<URV>::store(URV base, URV addr, STORE_TYPE storeVal)
   }
 #endif
 
-  // Misaligned store to io section causes an exception. Crossing dccm
-  // to non-dccm causes an exception.
-  unsigned stSize = sizeof(STORE_TYPE);
-  constexpr unsigned alignMask = sizeof(STORE_TYPE) - 1;
-  bool misal = addr & alignMask;
-  misalignedLdSt_ = misal;
-  if (misal and misalignedAccessCausesException(addr, stSize))
-    {
-      if (triggerTripped_)
-        return false;  // No exception if earlier trigger tripped.
-      initiateStoreException(ExceptionCause::STORE_ADDR_MISAL, addr);
-      return false;
-    }
+  // Determine if a store exception is possible.
+  STORE_TYPE maskedVal = storeVal;  // Masked store value.
+  auto secCause = SecondaryCause::NONE;
+  ExceptionCause cause = determineStoreException(rs1, base, addr,
+						 maskedVal, secCause);
 
-  if (forceAccessFail_)
-    {
-      initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
-      return false;
-    }
-
-  STORE_TYPE maskedVal = storeVal;
-  if (hasTrig and memory_.checkWrite(addr, maskedVal))
-    {
-      // No exception: consider store-data  trigger
-      if (ldStDataTriggerHit(maskedVal, timing, isLoad, isInterruptEnabled()))
-        triggerTripped_ = true;
-    }
+  // Consider store-data  trigger
+  if (hasTrig and cause == ExceptionCause::NONE)
+    if (ldStDataTriggerHit(maskedVal, timing, isLd, isInterruptEnabled()))
+      triggerTripped_ = true;
   if (triggerTripped_)
     return false;
 
+  if (cause != ExceptionCause::NONE)
+    {
+      initiateStoreException(cause, addr, secCause);
+      return false;
+    }
+
+  unsigned stSize = sizeof(STORE_TYPE);
   if (wideLdSt_)
     return wideStore(addr, storeVal, stSize);
 
-  if (memory_.write(addr, storeVal))
+  if (memory_.write(localHartId_, addr, storeVal))
     {
-      // if (hasLr_)
-      //   {
-      //     size_t ss = sizeof(STORE_TYPE);
-      //     if (addr >= lrAddr_ and addr <= lrAddr_ + ss - 1)
-      //       hasLr_ = false;
-      //   }
+      memory_.invalidateOtherHartLr(localHartId_, addr, stSize);
 
       invalidateDecodeCache(addr, stSize);
 
@@ -6185,50 +6449,36 @@ Core<URV>::store(URV base, URV addr, STORE_TYPE storeVal)
             }
         }
 
-      if (maxStoreQueueSize_)
-        {
-          uint64_t prevVal = 0;
-          memory_.getLastWriteOldValue(prevVal);
-          putInStoreQueue(sizeof(STORE_TYPE), addr, storeVal, prevVal);
-        }
       return true;
     }
 
-  // Store failed: Take exception.
-  initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
+  // Store failed: Take exception. Should not happen but we are paranoid.
+  initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr, secCause);
   return false;
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSb(const DecodedInst* di)
+Hart<URV>::execSb(const DecodedInst* di)
 {
   uint32_t rs1 = di->op1();
   URV base = intRegs_.read(rs1);
   URV addr = base + SRV(di->op2AsInt());
   uint8_t value = uint8_t(intRegs_.read(di->op0()));
-
-  if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 1))
-    return;
-
-  store<uint8_t>(base, addr, value);
+  store<uint8_t>(rs1, base, addr, value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSh(const DecodedInst* di)
+Hart<URV>::execSh(const DecodedInst* di)
 {
   uint32_t rs1 = di->op1();
   URV base = intRegs_.read(rs1);
   URV addr = base + SRV(di->op2AsInt());
   uint16_t value = uint16_t(intRegs_.read(di->op0()));
-
-  if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 2))
-    return;
-
-  store<uint16_t>(base, addr, value);
+  store<uint16_t>(rs1, base, addr, value);
 }
 
 
@@ -6237,7 +6487,7 @@ namespace WdRiscv
 
   template<>
   void
-  Core<uint32_t>::execMul(const DecodedInst* di)
+  Hart<uint32_t>::execMul(const DecodedInst* di)
   {
     int32_t a = intRegs_.read(di->op1());
     int32_t b = intRegs_.read(di->op2());
@@ -6249,7 +6499,7 @@ namespace WdRiscv
 
   template<>
   void
-  Core<uint32_t>::execMulh(const DecodedInst* di)
+  Hart<uint32_t>::execMulh(const DecodedInst* di)
   {
     int64_t a = int32_t(intRegs_.read(di->op1()));  // sign extend.
     int64_t b = int32_t(intRegs_.read(di->op2()));
@@ -6262,7 +6512,7 @@ namespace WdRiscv
 
   template <>
   void
-  Core<uint32_t>::execMulhsu(const DecodedInst* di)
+  Hart<uint32_t>::execMulhsu(const DecodedInst* di)
   {
     int64_t a = int32_t(intRegs_.read(di->op1()));
     uint64_t b = intRegs_.read(di->op2());
@@ -6275,7 +6525,7 @@ namespace WdRiscv
 
   template <>
   void
-  Core<uint32_t>::execMulhu(const DecodedInst* di)
+  Hart<uint32_t>::execMulhu(const DecodedInst* di)
   {
     uint64_t a = intRegs_.read(di->op1());
     uint64_t b = intRegs_.read(di->op2());
@@ -6288,7 +6538,7 @@ namespace WdRiscv
 
   template<>
   void
-  Core<uint64_t>::execMul(const DecodedInst* di)
+  Hart<uint64_t>::execMul(const DecodedInst* di)
   {
     Int128 a = int64_t(intRegs_.read(di->op1()));  // sign extend to 64-bit
     Int128 b = int64_t(intRegs_.read(di->op2()));
@@ -6300,7 +6550,7 @@ namespace WdRiscv
 
   template<>
   void
-  Core<uint64_t>::execMulh(const DecodedInst* di)
+  Hart<uint64_t>::execMulh(const DecodedInst* di)
   {
     Int128 a = int64_t(intRegs_.read(di->op1()));  // sign extend.
     Int128 b = int64_t(intRegs_.read(di->op2()));
@@ -6313,7 +6563,7 @@ namespace WdRiscv
 
   template <>
   void
-  Core<uint64_t>::execMulhsu(const DecodedInst* di)
+  Hart<uint64_t>::execMulhsu(const DecodedInst* di)
   {
 
     Int128 a = int64_t(intRegs_.read(di->op1()));
@@ -6327,7 +6577,7 @@ namespace WdRiscv
 
   template <>
   void
-  Core<uint64_t>::execMulhu(const DecodedInst* di)
+  Hart<uint64_t>::execMulhu(const DecodedInst* di)
   {
     Uint128 a = intRegs_.read(di->op1());
     Uint128 b = intRegs_.read(di->op2());
@@ -6342,7 +6592,7 @@ namespace WdRiscv
 
 template <typename URV>
 void
-Core<URV>::execDiv(const DecodedInst* di)
+Hart<URV>::execDiv(const DecodedInst* di)
 {
   SRV a = intRegs_.read(di->op1());
   SRV b = intRegs_.read(di->op2());
@@ -6361,7 +6611,7 @@ Core<URV>::execDiv(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execDivu(const DecodedInst* di)
+Hart<URV>::execDivu(const DecodedInst* di)
 {
   URV a = intRegs_.read(di->op1());
   URV b = intRegs_.read(di->op2());
@@ -6375,7 +6625,7 @@ Core<URV>::execDivu(const DecodedInst* di)
 // Remainder instruction.
 template <typename URV>
 void
-Core<URV>::execRem(const DecodedInst* di)
+Hart<URV>::execRem(const DecodedInst* di)
 {
   SRV a = intRegs_.read(di->op1());
   SRV b = intRegs_.read(di->op2());
@@ -6395,7 +6645,7 @@ Core<URV>::execRem(const DecodedInst* di)
 // Unsigned remainder instruction.
 template <typename URV>
 void
-Core<URV>::execRemu(const DecodedInst* di)
+Hart<URV>::execRemu(const DecodedInst* di)
 {
   URV a = intRegs_.read(di->op1());
   URV b = intRegs_.read(di->op2());
@@ -6408,7 +6658,7 @@ Core<URV>::execRemu(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execLwu(const DecodedInst* di)
+Hart<URV>::execLwu(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6421,7 +6671,7 @@ Core<URV>::execLwu(const DecodedInst* di)
 
 template <>
 void
-Core<uint32_t>::execLd(const DecodedInst*)
+Hart<uint32_t>::execLd(const DecodedInst*)
 {
   illegalInst();
   return;
@@ -6430,7 +6680,7 @@ Core<uint32_t>::execLd(const DecodedInst*)
 
 template <>
 void
-Core<uint64_t>::execLd(const DecodedInst* di)
+Hart<uint64_t>::execLd(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6443,7 +6693,7 @@ Core<uint64_t>::execLd(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSd(const DecodedInst* di)
+Hart<URV>::execSd(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6456,17 +6706,13 @@ Core<URV>::execSd(const DecodedInst* di)
   URV base = intRegs_.read(rs1);
   URV addr = base + SRV(di->op2AsInt());
   URV value = intRegs_.read(di->op0());
-
-  if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-    return;
-
-  store<uint64_t>(base, addr, value);
+  store<uint64_t>(rs1, base, addr, value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSlliw(const DecodedInst* di)
+Hart<URV>::execSlliw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6492,7 +6738,7 @@ Core<URV>::execSlliw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSrliw(const DecodedInst* di)
+Hart<URV>::execSrliw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6518,7 +6764,7 @@ Core<URV>::execSrliw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSraiw(const DecodedInst* di)
+Hart<URV>::execSraiw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6544,7 +6790,7 @@ Core<URV>::execSraiw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAddiw(const DecodedInst* di)
+Hart<URV>::execAddiw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6561,7 +6807,7 @@ Core<URV>::execAddiw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAddw(const DecodedInst* di)
+Hart<URV>::execAddw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6577,7 +6823,7 @@ Core<URV>::execAddw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSubw(const DecodedInst* di)
+Hart<URV>::execSubw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6593,7 +6839,7 @@ Core<URV>::execSubw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSllw(const DecodedInst* di)
+Hart<URV>::execSllw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6610,7 +6856,7 @@ Core<URV>::execSllw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSrlw(const DecodedInst* di)
+Hart<URV>::execSrlw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6628,7 +6874,7 @@ Core<URV>::execSrlw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSraw(const DecodedInst* di)
+Hart<URV>::execSraw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6646,7 +6892,7 @@ Core<URV>::execSraw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execMulw(const DecodedInst* di)
+Hart<URV>::execMulw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6664,7 +6910,7 @@ Core<URV>::execMulw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execDivw(const DecodedInst* di)
+Hart<URV>::execDivw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6677,7 +6923,13 @@ Core<URV>::execDivw(const DecodedInst* di)
 
   int32_t word = -1;  // Divide by zero result
   if (word2 != 0)
-    word = word1 / word2;
+    {
+      int32_t minInt = int32_t(1) << 31;
+      if (word1 == minInt and word2 == -1)
+	word = word1;
+      else
+	word = word1 / word2;
+    }
 
   SRV value = word;  // sign extend to 64-bits
   intRegs_.write(di->op0(), value);
@@ -6686,7 +6938,7 @@ Core<URV>::execDivw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execDivuw(const DecodedInst* di)
+Hart<URV>::execDivuw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6701,14 +6953,14 @@ Core<URV>::execDivuw(const DecodedInst* di)
   if (word2 != 0)
     word = word1 / word2;
 
-  URV value = word;  // zero extend to 64-bits
+  URV value = SRV(int32_t(word));  // Sign extend to 64-bits
   intRegs_.write(di->op0(), value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execRemw(const DecodedInst* di)
+Hart<URV>::execRemw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6721,7 +6973,13 @@ Core<URV>::execRemw(const DecodedInst* di)
 
   int32_t word = word1;  // Divide by zero remainder
   if (word2 != 0)
-    word = word1 % word2;
+    {
+      int32_t minInt = int32_t(1) << 31;
+      if (word1 == minInt and word2 == -1)
+	word = 0;   // Per spec: User-Level ISA, Version 2.3, Section 6.2
+      else
+	word = word1 % word2;
+    }
 
   SRV value = word;  // sign extend to 64-bits
   intRegs_.write(di->op0(), value);
@@ -6730,7 +6988,7 @@ Core<URV>::execRemw(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execRemuw(const DecodedInst* di)
+Hart<URV>::execRemuw(const DecodedInst* di)
 {
   if (not isRv64())
     {
@@ -6742,17 +7000,17 @@ Core<URV>::execRemuw(const DecodedInst* di)
   uint32_t word2 = uint32_t(intRegs_.read(di->op2()));
 
   uint32_t word = word1;  // Divide by zero remainder
-  if (word1 != 0)
+  if (word2 != 0)
     word = word1 % word2;
 
-  URV value = word;  // zero extend to 64-bits
+  URV value = SRV(int32_t(word));  // Sign extend to 64-bits
   intRegs_.write(di->op0(), value);
 }
 
 
 template <typename URV>
 RoundingMode
-Core<URV>::effectiveRoundingMode(RoundingMode instMode)
+Hart<URV>::effectiveRoundingMode(RoundingMode instMode)
 {
   if (instMode != RoundingMode::Dynamic)
     return instMode;
@@ -6771,7 +7029,7 @@ Core<URV>::effectiveRoundingMode(RoundingMode instMode)
 
 template <typename URV>
 void
-Core<URV>::updateAccruedFpBits()
+Hart<URV>::updateAccruedFpBits()
 {
   URV val = 0;
   if (csRegs_.read(CsrNumber::FCSR, PrivilegeMode::Machine, debugMode_, val))
@@ -6805,22 +7063,24 @@ int
 setSimulatorRoundingMode(RoundingMode mode)
 {
   int previous = std::fegetround();
-  switch(mode)
-    {
-    case RoundingMode::NearestEven: std::fesetround(FE_TONEAREST);  break;
-    case RoundingMode::Zero:        std::fesetround(FE_TOWARDZERO); break;
-    case RoundingMode::Down:        std::fesetround(FE_DOWNWARD);   break;
-    case RoundingMode::Up:          std::fesetround(FE_UPWARD);     break;
-    case RoundingMode::NearestMax:  std::fesetround(FE_TONEAREST);  break; //FIX
-    default: break;
-    }
+  int next = previous;
+
+  if      (mode == RoundingMode::NearestEven) next = FE_TONEAREST;
+  else if (mode == RoundingMode::Zero)        next = FE_TOWARDZERO;
+  else if (mode == RoundingMode::Down)        next = FE_DOWNWARD;
+  else if (mode == RoundingMode::Up)          next = FE_UPWARD;
+  else if (mode == RoundingMode::NearestMax)  next = FE_TONEAREST;  
+
+  if (next != previous)
+    std::fesetround(next);
+
   return previous;
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFlw(const DecodedInst* di)
+Hart<URV>::execFlw(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -6851,41 +7111,46 @@ Core<URV>::execFlw(const DecodedInst* di)
   if (eaCompatWithBase_)
     forceAccessFail_ = forceAccessFail_ or effectiveAndBaseAddrMismatch(addr, base);
 
+  auto cause2 = SecondaryCause::NONE;
+
   // Misaligned load from io section triggers an exception. Crossing
   // dccm to non-dccm causes an exception.
   unsigned ldSize = 4;
   constexpr unsigned alignMask = 3;
   bool misal = addr & alignMask;
   misalignedLdSt_ = misal;
-  if (misal and misalignedAccessCausesException(addr, ldSize))
+  if (misal and misalignedAccessCausesException(addr, ldSize, cause2))
     {
-      initiateLoadException(ExceptionCause::LOAD_ADDR_MISAL, addr, ldSize);
+      initiateLoadException(ExceptionCause::LOAD_ADDR_MISAL, addr, cause2);
       return;
     }
-
-  union UFU  // Unsigned float union: reinterpret bits as unsigned or float
-  {
-    uint32_t u;
-    float f;
-  };
 
   uint32_t word = 0;
   if (not forceAccessFail_ and memory_.read(addr, word))
     {
-      UFU ufu;
-      ufu.u = word;
+      Uint32FloatUnion ufu(word);
       fpRegs_.writeSingle(rd, ufu.f);
     }
   else
     {
-      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, ldSize);
+      auto cause = ExceptionCause::LOAD_ACC_FAULT;
+      auto secCause = SecondaryCause::LOAD_ACC_MEM_PROTECTION;
+      if (memory_.isAddrInMappedRegs(addr))
+	secCause = SecondaryCause::LOAD_ACC_PIC;
+      else
+	{
+	  size_t region = memory_.getRegionIndex(addr);
+	  if (regionHasLocalDataMem_.at(region))
+	    secCause = SecondaryCause::LOAD_ACC_LOCAL_UNMAPPED;
+	}
+      initiateLoadException(cause, addr, secCause);
     }
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFsw(const DecodedInst* di)
+Hart<URV>::execFsw(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -6900,34 +7165,57 @@ Core<URV>::execFsw(const DecodedInst* di)
   URV addr = base + SRV(imm);
   float val = fpRegs_.readSingle(rs2);
 
-  union UFU  // Unsigned float union: reinterpret bits as unsigned or float
-  {
-    uint32_t u;
-    float f;
-  };
-
-  UFU ufu;
-  ufu.f = val;
-
-  if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-    return;
-
-  store<uint32_t>(base, addr, ufu.u);
+  Uint32FloatUnion ufu(val);
+  store<uint32_t>(rs1, base, addr, ufu.u);
 }
 
 
+/// Clear the floating point flags in the machine running this
+/// simulator. Do nothing in the simuated RISCV machine.
 inline
 void
-feClearAllExceptions()
+clearSimulatorFpFlags()
 {
   // asm("fnclex");
   std::feclearexcept(FE_ALL_EXCEPT);
 }
 
 
+/// Use fused mutiply-add to perform x*y + z.
+/// Set invalid to true if x and y are zero and infinity or
+/// vice versa since RISCV consider that as an invalid operation.
+static
+float
+fusedMultiplyAdd(float x, float y, float z, bool& invalid)
+{
+#ifdef __FP_FAST_FMA
+  float res = x*y + z;
+#else
+  float res = std::fma(x, y, z);
+#endif
+  invalid = (std::isinf(x) and y == 0) or (x == 0 and std::isinf(y));
+  return res;
+}
+
+
+/// Use fused mutiply-add to perform x*y + z.
+static
+double
+fusedMultiplyAdd(double x, double y, double z, bool& invalid)
+{
+#ifdef __FP_FAST_FMA
+  double res = x*y + z;
+#else
+  double res = std::fma(x, y, z);
+#endif
+  invalid = (std::isinf(x) and y == 0) or (x == 0 and std::isinf(y));
+  return res;
+}
+
+
 template <typename URV>
 void
-Core<URV>::execFmadd_s(const DecodedInst* di)
+Hart<URV>::execFmadd_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -6942,23 +7230,32 @@ Core<URV>::execFmadd_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   float f1 = fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
   float f3 = fpRegs_.readSingle(di->op3());
-  float res = std::fma(f1, f2, f3);
+
+  bool invalid = false;
+  float res = fusedMultiplyAdd(f1, f2, f3, invalid);
+  if (std::isnan(res))
+    res = std::numeric_limits<float>::quiet_NaN();
+
   fpRegs_.writeSingle(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (invalid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmsub_s(const DecodedInst* di)
+Hart<URV>::execFmsub_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -6973,23 +7270,32 @@ Core<URV>::execFmsub_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   float f1 = fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
-  float f3 = fpRegs_.readSingle(di->op3());
-  float res = std::fma(f1, f2, -f3);
+  float f3 = -fpRegs_.readSingle(di->op3());
+
+  bool invalid = false;
+  float res = fusedMultiplyAdd(f1, f2, f3, invalid);
+  if (std::isnan(res))
+    res = std::numeric_limits<float>::quiet_NaN();
+
   fpRegs_.writeSingle(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (invalid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFnmsub_s(const DecodedInst* di)
+Hart<URV>::execFnmsub_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7004,23 +7310,32 @@ Core<URV>::execFnmsub_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
-  float f1 = fpRegs_.readSingle(di->op1());
+  float f1 = -fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
   float f3 = fpRegs_.readSingle(di->op3());
-  float res = std::fma(f1, f2, -f3);
-  fpRegs_.writeSingle(di->op0(), -res);
+
+  bool invalid = false;
+  float res = fusedMultiplyAdd(f1, f2, f3, invalid);
+  if (std::isnan(res))
+    res = std::numeric_limits<float>::quiet_NaN();
+
+  fpRegs_.writeSingle(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (invalid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFnmadd_s(const DecodedInst* di)
+Hart<URV>::execFnmadd_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7035,23 +7350,34 @@ Core<URV>::execFnmadd_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
-  float f1 = fpRegs_.readSingle(di->op1());
+  // we want -(f[op1] * f[op2]) - f[op3]
+
+  float f1 = -fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
-  float f3 = fpRegs_.readSingle(di->op3());
-  float res = std::fma(f1, f2, f3);
-  fpRegs_.writeSingle(di->op0(), -res);
+  float f3 = -fpRegs_.readSingle(di->op3());
+
+  bool invalid = false;
+  float res = fusedMultiplyAdd(f1, f2, f3, invalid);
+  if (std::isnan(res))
+    res = std::numeric_limits<float>::quiet_NaN();
+
+  fpRegs_.writeSingle(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (invalid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFadd_s(const DecodedInst* di)
+Hart<URV>::execFadd_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7066,22 +7392,27 @@ Core<URV>::execFadd_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   float f1 = fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
   float res = f1 + f2;
+  if (std::isnan(res))
+    res = std::numeric_limits<float>::quiet_NaN();
+
   fpRegs_.writeSingle(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFsub_s(const DecodedInst* di)
+Hart<URV>::execFsub_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7096,22 +7427,27 @@ Core<URV>::execFsub_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   float f1 = fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
   float res = f1 - f2;
+  if (std::isnan(res))
+    res = std::numeric_limits<float>::quiet_NaN();
+
   fpRegs_.writeSingle(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmul_s(const DecodedInst* di)
+Hart<URV>::execFmul_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7132,16 +7468,21 @@ Core<URV>::execFmul_s(const DecodedInst* di)
   float f1 = fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
   float res = f1 * f2;
+  if (std::isnan(res))
+    res = std::numeric_limits<float>::quiet_NaN();
+
   fpRegs_.writeSingle(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFdiv_s(const DecodedInst* di)
+Hart<URV>::execFdiv_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7156,22 +7497,27 @@ Core<URV>::execFdiv_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   float f1 = fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
   float res = f1 / f2;
+  if (std::isnan(res))
+    res = std::numeric_limits<float>::quiet_NaN();
+
   fpRegs_.writeSingle(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFsqrt_s(const DecodedInst* di)
+Hart<URV>::execFsqrt_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7191,16 +7537,21 @@ Core<URV>::execFsqrt_s(const DecodedInst* di)
 
   float f1 = fpRegs_.readSingle(di->op1());
   float res = std::sqrt(f1);
+  if (std::isnan(res))
+    res = std::numeric_limits<float>::quiet_NaN();
+
   fpRegs_.writeSingle(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFsgnj_s(const DecodedInst* di)
+Hart<URV>::execFsgnj_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7217,7 +7568,7 @@ Core<URV>::execFsgnj_s(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execFsgnjn_s(const DecodedInst* di)
+Hart<URV>::execFsgnjn_s(const DecodedInst* di)
 {
   if (not isRvf())   {
       illegalInst();
@@ -7234,7 +7585,7 @@ Core<URV>::execFsgnjn_s(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execFsgnjx_s(const DecodedInst* di)
+Hart<URV>::execFsgnjx_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7256,9 +7607,41 @@ Core<URV>::execFsgnjx_s(const DecodedInst* di)
 }
 
 
+/// Return true if given float is a signaling not-a-number.
+static
+bool
+issnan(float f)
+{
+  if (std::isnan(f))
+    {
+      Uint32FloatUnion ufu(f);
+
+      // Most sig bit of significant must be zero.
+      return ((ufu.u >> 22) & 1) == 0;
+    }
+  return false;
+}
+
+
+/// Return true if given double is a signaling not-a-number.
+static
+bool
+issnan(double d)
+{
+  if (std::isnan(d))
+    {
+      Uint64DoubleUnion udu(d);
+
+      // Most sig bit of significant must be zero.
+      return ((udu.u >> 51) & 1) == 0;
+    }
+  return false;
+}
+
+
 template <typename URV>
 void
-Core<URV>::execFmin_s(const DecodedInst* di)
+Hart<URV>::execFmin_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7268,14 +7651,30 @@ Core<URV>::execFmin_s(const DecodedInst* di)
 
   float in1 = fpRegs_.readSingle(di->op1());
   float in2 = fpRegs_.readSingle(di->op2());
-  float res = std::fminf(in1, in2);
+  float res = 0;
+
+  bool isNan1 = std::isnan(in1), isNan2 = std::isnan(in2);
+  if (isNan1 and isNan2)
+    res = std::numeric_limits<float>::quiet_NaN();
+  else if (isNan1)
+    res = in2;
+  else if (isNan2)
+    res = in1;
+  else
+    res = std::fminf(in1, in2);
+
+  if (issnan(in1) or issnan(in2))
+    setInvalidInFcsr();
+  else if (std::signbit(in1) != std::signbit(in2) and in1 == in2)
+    res = std::copysign(res, -1.0F);  // Make sure min(-0, +0) is -0.
+
   fpRegs_.writeSingle(di->op0(), res);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmax_s(const DecodedInst* di)
+Hart<URV>::execFmax_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7285,14 +7684,52 @@ Core<URV>::execFmax_s(const DecodedInst* di)
 
   float in1 = fpRegs_.readSingle(di->op1());
   float in2 = fpRegs_.readSingle(di->op2());
-  float res = std::fmaxf(in1, in2);
+  float res = 0;
+
+  bool isNan1 = std::isnan(in1), isNan2 = std::isnan(in2);
+  if (isNan1 and isNan2)
+    res = std::numeric_limits<float>::quiet_NaN();
+  else if (isNan1)
+    res = in2;
+  else if (isNan2)
+    res = in1;
+  else
+    res = std::fmaxf(in1, in2);
+
+  if (issnan(in1) or issnan(in2))
+    setInvalidInFcsr();
+  else if (std::signbit(in1) != std::signbit(in2) and in1 == in2)
+    res = std::copysign(res, 1.0F);  // Make sure max(-0, +0) is +0.
+
   fpRegs_.writeSingle(di->op0(), res);
+}
+
+
+/// Return sign bit (0 or 1) of given float. Works for all float
+/// values including NANs and INFINITYs.
+static
+unsigned
+signOf(float f)
+{
+  Uint32FloatUnion ufu(f);
+  return ufu.u >> 31;
+}
+
+
+/// Return sign bit (0 or 1) of given double. Works for all double
+/// values including NANs and INFINITYs.
+static
+unsigned
+signOf(double d)
+{
+  Uint64DoubleUnion udu(d);
+  return udu.u >> 63;
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_w_s(const DecodedInst* di)
+Hart<URV>::execFcvt_w_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7307,21 +7744,49 @@ Core<URV>::execFcvt_w_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   float f1 = fpRegs_.readSingle(di->op1());
-  SRV result = int32_t(f1);
+  SRV result = 0;
+  bool valid = false;
+
+  int32_t minInt = int32_t(1) << 31;
+  int32_t maxInt = (~uint32_t(0)) >> 1;
+
+  unsigned signBit = signOf(f1);
+  if (std::isinf(f1))
+    result = signBit ? minInt : maxInt;
+  else if (std::isnan(f1))
+    result = maxInt;
+  else
+    {
+      float near = std::nearbyint(f1);
+      if (near > float(maxInt))
+	result = maxInt;
+      else if (near < float(minInt))
+	result = SRV(minInt);
+      else
+	{
+	  valid = true;
+	  result = int32_t(std::lrintf(f1));
+	}
+    }
+
   intRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (not valid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_wu_s(const DecodedInst* di)
+Hart<URV>::execFcvt_wu_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7336,21 +7801,56 @@ Core<URV>::execFcvt_wu_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   float f1 = fpRegs_.readSingle(di->op1());
-  URV result = uint32_t(f1);
+  SRV result = 0;
+  bool valid = false;
+
+  uint32_t maxInt = ~uint32_t(0);
+
+  unsigned signBit = signOf(f1);
+  if (std::isinf(f1))
+    {
+      if (signBit)
+	result = 0;
+      else
+	result = SRV(int32_t(maxInt));  // Sign extend to SRV.
+    }
+  else if (std::isnan(f1))
+    result = SRV(int32_t(maxInt));
+  else
+    {
+      if (signBit)
+	result = 0;
+      else
+	{
+	  float near = std::nearbyint(f1);
+	  if (near > float(maxInt))
+	    result = SRV(int32_t(maxInt));
+	  else
+	    {
+	      valid = true;
+	      result = SRV(int32_t(std::lrint(f1)));
+	    }
+	}
+    }
+
   intRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (not valid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmv_x_w(const DecodedInst* di)
+Hart<URV>::execFmv_x_w(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7360,16 +7860,9 @@ Core<URV>::execFmv_x_w(const DecodedInst* di)
 
   float f1 = fpRegs_.readSingle(di->op1());
 
-  union IFU  // Int float union: reinterpret bits as int or float
-  {
-    int32_t i;
-    float f;
-  };
+  Uint32FloatUnion ufu(f1);
 
-  IFU ifu;
-  ifu.f = f1;
-
-  SRV value = SRV(ifu.i); // Sign extend.
+  SRV value = SRV(int32_t(ufu.u)); // Sign extend.
 
   intRegs_.write(di->op0(), value);
 }
@@ -7377,7 +7870,7 @@ Core<URV>::execFmv_x_w(const DecodedInst* di)
  
 template <typename URV>
 void
-Core<URV>::execFeq_s(const DecodedInst* di)
+Hart<URV>::execFeq_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7385,21 +7878,26 @@ Core<URV>::execFeq_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
-
   float f1 = fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
 
-  URV res = (f1 == f2)? 1 : 0;
-  intRegs_.write(di->op0(), res);
+  URV res = 0;
 
-  updateAccruedFpBits();
+  if (std::isnan(f1) or std::isnan(f2))
+    {
+      if (issnan(f1) or issnan(f2))
+	setInvalidInFcsr();
+    }
+  else
+    res = (f1 == f2)? 1 : 0;
+
+  intRegs_.write(di->op0(), res);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFlt_s(const DecodedInst* di)
+Hart<URV>::execFlt_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7407,21 +7905,23 @@ Core<URV>::execFlt_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
-
   float f1 = fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
 
-  URV res = (f1 < f2)? 1 : 0;
-  intRegs_.write(di->op0(), res);
+  URV res = 0;
 
-  updateAccruedFpBits();
+  if (std::isnan(f1) or std::isnan(f2))
+    setInvalidInFcsr();
+  else
+    res = (f1 < f2)? 1 : 0;
+    
+  intRegs_.write(di->op0(), res);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFle_s(const DecodedInst* di)
+Hart<URV>::execFle_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7429,30 +7929,24 @@ Core<URV>::execFle_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
-
   float f1 = fpRegs_.readSingle(di->op1());
   float f2 = fpRegs_.readSingle(di->op2());
 
-  URV res = (f1 <= f2)? 1 : 0;
-  intRegs_.write(di->op0(), res);
+  URV res = 0;
 
-  updateAccruedFpBits();
+  if (std::isnan(f1) or std::isnan(f2))
+    setInvalidInFcsr();
+  else
+    res = (f1 <= f2)? 1 : 0;
+
+  intRegs_.write(di->op0(), res);
 }
 
 
 bool
 mostSignificantFractionBit(float x)
 {
-  union UFU
-  {
-    uint32_t u;
-    float f;
-  };
-
-  UFU ufu;
-  ufu.f = x;
-
+  Uint32FloatUnion ufu(x);
   return (ufu.u >> 22) & 1;
 }
 
@@ -7460,15 +7954,7 @@ mostSignificantFractionBit(float x)
 bool
 mostSignificantFractionBit(double x)
 {
-  union UDU
-  {
-    uint64_t u;
-    double d;
-  };
-
-  UDU udu;
-  udu.d = x;
-
+  Uint64DoubleUnion udu(x);
   return (udu.u >> 51) & 1;
 }
 
@@ -7476,7 +7962,7 @@ mostSignificantFractionBit(double x)
 
 template <typename URV>
 void
-Core<URV>::execFclass_s(const DecodedInst* di)
+Hart<URV>::execFclass_s(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7533,7 +8019,7 @@ Core<URV>::execFclass_s(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execFcvt_s_w(const DecodedInst* di)
+Hart<URV>::execFcvt_s_w(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7548,21 +8034,23 @@ Core<URV>::execFcvt_s_w(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
-  SRV i1 = intRegs_.read(di->op1());
+  int32_t i1 = intRegs_.read(di->op1());
   float result = float(i1);
   fpRegs_.writeSingle(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_s_wu(const DecodedInst* di)
+Hart<URV>::execFcvt_s_wu(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7577,7 +8065,7 @@ Core<URV>::execFcvt_s_wu(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   uint32_t u1 = intRegs_.read(di->op1());
@@ -7585,13 +8073,15 @@ Core<URV>::execFcvt_s_wu(const DecodedInst* di)
   fpRegs_.writeSingle(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmv_w_x(const DecodedInst* di)
+Hart<URV>::execFmv_w_x(const DecodedInst* di)
 {
   if (not isRvf())
     {
@@ -7601,22 +8091,22 @@ Core<URV>::execFmv_w_x(const DecodedInst* di)
 
   uint32_t u1 = intRegs_.read(di->op1());
 
-  union UFU  // Unsigned float union: reinterpret bits as unsigned or float
-  {
-    uint32_t u;
-    float f;
-  };
-
-  UFU ufu;
-  ufu.u = u1;
-
+  Uint32FloatUnion ufu(u1);
   fpRegs_.writeSingle(di->op0(), ufu.f);
 }
 
 
-template <typename URV>
+template <>
 void
-Core<URV>::execFcvt_l_s(const DecodedInst* di)
+Hart<uint32_t>::execFcvt_l_s(const DecodedInst*)
+{
+  illegalInst();  // fcvt.l.s is not an RV32 instruction.
+}
+
+
+template <>
+void
+Hart<uint64_t>::execFcvt_l_s(const DecodedInst* di)
 {
   if (not isRv64() or not isRvf())
     {
@@ -7631,21 +8121,136 @@ Core<URV>::execFcvt_l_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   float f1 = fpRegs_.readSingle(di->op1());
-  SRV result = SRV(f1);
+  SRV result = 0;
+  bool valid = false;
+
+  int64_t maxInt = (~uint64_t(0)) >> 1;
+  int64_t minInt = int64_t(1) << 63;
+
+  unsigned signBit = signOf(f1);
+  if (std::isinf(f1))
+    {
+      if (signBit)
+	result = minInt;
+      else
+	result = maxInt;
+    }
+  else if (std::isnan(f1))
+    result = maxInt;
+  else
+    {
+      double near = std::nearbyint(double(f1));
+      if (near > double(maxInt))
+	result = maxInt;
+      else if (near < double(minInt))
+	result = minInt;
+      else
+	{
+	  valid = true;
+	  result = std::lrint(f1);
+	}
+    }
+
   intRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (not valid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
+}
+
+
+template <>
+void
+Hart<uint32_t>::execFcvt_lu_s(const DecodedInst*)
+{
+  illegalInst();  // RV32 does not have fcvt.lu.s
+}
+
+
+template <>
+void
+Hart<uint64_t>::execFcvt_lu_s(const DecodedInst* di)
+{
+  if (not isRv64() or not isRvf())
+    {
+      illegalInst();
+      return;
+    }
+
+  RoundingMode riscvMode = effectiveRoundingMode(di->roundingMode());
+  if (riscvMode >= RoundingMode::Invalid1)
+    {
+      illegalInst();
+      return;
+    }
+
+  clearSimulatorFpFlags();
+  int prevMode = setSimulatorRoundingMode(riscvMode);
+
+  float f1 = fpRegs_.readSingle(di->op1());
+  uint64_t result = 0;
+  bool valid = false;
+
+  uint64_t maxUint = ~uint64_t(0);
+
+  unsigned signBit = signOf(f1);
+  if (std::isinf(f1))
+    {
+      if (signBit)
+	result = 0;
+      else
+	result = maxUint;
+    }
+  else if (std::isnan(f1))
+    result = maxUint;
+  else
+    {
+      if (signBit)
+	result = 0;
+      else
+	{
+	  double near = std::nearbyint(double(f1));
+	  // Using "near > maxUint" will not work beacuse of rounding.
+	  if (near >= 2*double(uint64_t(1)<<63))
+	    result = maxUint;
+	  else
+	    {
+	      valid = true;
+	      // std::lprint will produce an overflow if most sig bit
+	      // of result is 1 (it thinks there's an overflow).  We
+	      // compensate with the divide multiply by 2.
+	      if (f1 < (uint64_t(1) << 63))
+		result = std::llrint(f1);
+	      else
+		{
+		  result = std::llrint(f1/2);
+		  result *= 2;
+		}
+	    }
+	}
+    }
+
+  intRegs_.write(di->op0(), result);
+
+  updateAccruedFpBits();
+  if (not valid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_lu_s(const DecodedInst* di)
+Hart<URV>::execFcvt_s_l(const DecodedInst* di)
 {
   if (not isRv64() or not isRvf())
     {
@@ -7660,36 +8265,7 @@ Core<URV>::execFcvt_lu_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
-  int prevMode = setSimulatorRoundingMode(riscvMode);
-
-  float f1 = fpRegs_.readSingle(di->op1());
-  URV result = URV(f1);
-  intRegs_.write(di->op0(), result);
-
-  updateAccruedFpBits();
-  std::fesetround(prevMode);
-}
-
-
-template <typename URV>
-void
-Core<URV>::execFcvt_s_l(const DecodedInst* di)
-{
-  if (not isRv64() or not isRvf())
-    {
-      illegalInst();
-      return;
-    }
-
-  RoundingMode riscvMode = effectiveRoundingMode(di->roundingMode());
-  if (riscvMode >= RoundingMode::Invalid1)
-    {
-      illegalInst();
-      return;
-    }
-
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   SRV i1 = intRegs_.read(di->op1());
@@ -7697,13 +8273,15 @@ Core<URV>::execFcvt_s_l(const DecodedInst* di)
   fpRegs_.writeSingle(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_s_lu(const DecodedInst* di)
+Hart<URV>::execFcvt_s_lu(const DecodedInst* di)
 {
   if (not isRv64() or not isRvf())
     {
@@ -7718,7 +8296,7 @@ Core<URV>::execFcvt_s_lu(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   URV i1 = intRegs_.read(di->op1());
@@ -7726,13 +8304,15 @@ Core<URV>::execFcvt_s_lu(const DecodedInst* di)
   fpRegs_.writeSingle(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFld(const DecodedInst* di)
+Hart<URV>::execFld(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -7760,15 +8340,17 @@ Core<URV>::execFld(const DecodedInst* di)
   if (eaCompatWithBase_)
     forceAccessFail_ = forceAccessFail_ or effectiveAndBaseAddrMismatch(addr, base);
 
+  auto cause2 = SecondaryCause::NONE;
+
   // Misaligned load from io section triggers an exception. Crossing
   // dccm to non-dccm causes an exception.
   unsigned ldSize = 8;
   constexpr unsigned alignMask = 7;
   bool misal = addr & alignMask;
   misalignedLdSt_ = misal;
-  if (misal and misalignedAccessCausesException(addr, ldSize))
+  if (misal and misalignedAccessCausesException(addr, ldSize, cause2))
     {
-      initiateLoadException(ExceptionCause::LOAD_ADDR_MISAL, addr, ldSize);
+      initiateLoadException(ExceptionCause::LOAD_ADDR_MISAL, addr, cause2);
       return;
     }
 
@@ -7787,14 +8369,15 @@ Core<URV>::execFld(const DecodedInst* di)
     }
   else
     {
-      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, ldSize);
+      cause2 = SecondaryCause::LOAD_ACC_MEM_PROTECTION;
+      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, cause2);
     }
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFsd(const DecodedInst* di)
+Hart<URV>::execFsd(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -7818,16 +8401,13 @@ Core<URV>::execFsd(const DecodedInst* di)
   UDU udu;
   udu.d = val;
 
-  if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-    return;
-
-  store<uint64_t>(base, addr, udu.u);
+  store<uint64_t>(rs1, base, addr, udu.u);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmadd_d(const DecodedInst* di)
+Hart<URV>::execFmadd_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -7842,23 +8422,32 @@ Core<URV>::execFmadd_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double f1 = fpRegs_.read(di->op1());
   double f2 = fpRegs_.read(di->op2());
   double f3 = fpRegs_.read(di->op3());
-  double res = std::fma(f1, f2, f3);
+
+  bool invalid = false;
+  double res = fusedMultiplyAdd(f1, f2, f3, invalid);
+  if (std::isnan(res))
+    res = std::numeric_limits<double>::quiet_NaN();
+
   fpRegs_.write(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (invalid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmsub_d(const DecodedInst* di)
+Hart<URV>::execFmsub_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -7873,23 +8462,33 @@ Core<URV>::execFmsub_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double f1 = fpRegs_.read(di->op1());
   double f2 = fpRegs_.read(di->op2());
-  double f3 = fpRegs_.read(di->op3());
-  double res = std::fma(f1, f2, -f3);
+  double f3 = -fpRegs_.read(di->op3());
+
+  bool invalid = false;
+  double res = fusedMultiplyAdd(f1, f2, f3, invalid);
+
+  if (std::isnan(res))
+    res = std::numeric_limits<double>::quiet_NaN();
+
   fpRegs_.write(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (invalid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFnmsub_d(const DecodedInst* di)
+Hart<URV>::execFnmsub_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -7904,23 +8503,32 @@ Core<URV>::execFnmsub_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
-  double f1 = fpRegs_.read(di->op1());
+  double f1 = -fpRegs_.read(di->op1());
   double f2 = fpRegs_.read(di->op2());
   double f3 = fpRegs_.read(di->op3());
-  double res = std::fma(f1, f2, -f3);
-  fpRegs_.write(di->op0(), -res);
+
+  bool invalid = false;
+  double res = fusedMultiplyAdd(f1, f2, f3, invalid);
+  if (std::isnan(res))
+    res = std::numeric_limits<double>::quiet_NaN();
+
+  fpRegs_.write(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (invalid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFnmadd_d(const DecodedInst* di)
+Hart<URV>::execFnmadd_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -7935,23 +8543,34 @@ Core<URV>::execFnmadd_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
-  double f1 = fpRegs_.read(di->op1());
+  // we want -(f[op1] * f[op2]) - f[op3]
+
+  double f1 = -fpRegs_.read(di->op1());
   double f2 = fpRegs_.read(di->op2());
-  double f3 = fpRegs_.read(di->op3());
-  double res = std::fma(f1, f2, f3);
-  fpRegs_.write(di->op0(), -res);
+  double f3 = -fpRegs_.read(di->op3());
+
+  bool invalid = false;
+  double res = fusedMultiplyAdd(f1, f2, f3, invalid);
+  if (std::isnan(res))
+    res = std::numeric_limits<double>::quiet_NaN();
+
+  fpRegs_.write(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (invalid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFadd_d(const DecodedInst* di)
+Hart<URV>::execFadd_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -7966,22 +8585,27 @@ Core<URV>::execFadd_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double d1 = fpRegs_.read(di->op1());
   double d2 = fpRegs_.read(di->op2());
   double res = d1 + d2;
+  if (std::isnan(res))
+    res = std::numeric_limits<double>::quiet_NaN();
+
   fpRegs_.write(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFsub_d(const DecodedInst* di)
+Hart<URV>::execFsub_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -7996,22 +8620,27 @@ Core<URV>::execFsub_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double d1 = fpRegs_.read(di->op1());
   double d2 = fpRegs_.read(di->op2());
   double res = d1 - d2;
+  if (std::isnan(res))
+    res = std::numeric_limits<double>::quiet_NaN();
+
   fpRegs_.write(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmul_d(const DecodedInst* di)
+Hart<URV>::execFmul_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8026,22 +8655,27 @@ Core<URV>::execFmul_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double d1 = fpRegs_.read(di->op1());
   double d2 = fpRegs_.read(di->op2());
   double res = d1 * d2;
+  if (std::isnan(res))
+    res = std::numeric_limits<double>::quiet_NaN();
+
   fpRegs_.write(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFdiv_d(const DecodedInst* di)
+Hart<URV>::execFdiv_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8057,22 +8691,27 @@ Core<URV>::execFdiv_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double d1 = fpRegs_.read(di->op1());
   double d2 = fpRegs_.read(di->op2());
   double res = d1 / d2;
+  if (std::isnan(res))
+    res = std::numeric_limits<double>::quiet_NaN();
+
   fpRegs_.write(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFsgnj_d(const DecodedInst* di)
+Hart<URV>::execFsgnj_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8089,7 +8728,7 @@ Core<URV>::execFsgnj_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execFsgnjn_d(const DecodedInst* di)
+Hart<URV>::execFsgnjn_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8107,7 +8746,7 @@ Core<URV>::execFsgnjn_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execFsgnjx_d(const DecodedInst* di)
+Hart<URV>::execFsgnjx_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8131,7 +8770,7 @@ Core<URV>::execFsgnjx_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execFmin_d(const DecodedInst* di)
+Hart<URV>::execFmin_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8141,14 +8780,30 @@ Core<URV>::execFmin_d(const DecodedInst* di)
 
   double in1 = fpRegs_.read(di->op1());
   double in2 = fpRegs_.read(di->op2());
-  double res = fmin(in1, in2);
+  double res = 0;
+
+  bool isNan1 = std::isnan(in1), isNan2 = std::isnan(in2);
+  if (isNan1 and isNan2)
+    res = std::numeric_limits<double>::quiet_NaN();
+  else if (isNan1)
+    res = in2;
+  else if (isNan2)
+    res = in1;
+  else
+    res = fmin(in1, in2);
+
+  if (issnan(in1) or issnan(in2))
+    setInvalidInFcsr();
+  else if (std::signbit(in1) != std::signbit(in2) and in1 == in2)
+    res = std::copysign(res, -1.0);  // Make sure min(-0, +0) is -0.
+
   fpRegs_.write(di->op0(), res);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmax_d(const DecodedInst* di)
+Hart<URV>::execFmax_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8158,14 +8813,30 @@ Core<URV>::execFmax_d(const DecodedInst* di)
 
   double in1 = fpRegs_.read(di->op1());
   double in2 = fpRegs_.read(di->op2());
-  double res = fmax(in1, in2);
+  double res = 0;
+
+  bool isNan1 = std::isnan(in1), isNan2 = std::isnan(in2);
+  if (isNan1 and isNan2)
+    res = std::numeric_limits<double>::quiet_NaN();
+  else if (isNan1)
+    res = in2;
+  else if (isNan2)
+    res = in1;
+  else
+    res = std::fmax(in1, in2);
+
+  if (issnan(in1) or issnan(in2))
+    setInvalidInFcsr();
+  else if (std::signbit(in1) != std::signbit(in2) and in1 == in2)
+    res = std::copysign(res, 1.0);  // Make sure max(-0, +0) is +0.
+
   fpRegs_.write(di->op0(), res);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_d_s(const DecodedInst* di)
+Hart<URV>::execFcvt_d_s(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8180,21 +8851,26 @@ Core<URV>::execFcvt_d_s(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   float f1 = fpRegs_.readSingle(di->op1());
   double result = f1;
+  if (std::isnan(result))
+    result = std::numeric_limits<double>::quiet_NaN();
+
   fpRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_s_d(const DecodedInst* di)
+Hart<URV>::execFcvt_s_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8209,21 +8885,26 @@ Core<URV>::execFcvt_s_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double d1 = fpRegs_.read(di->op1());
   float result = float(d1);
+  if (std::isnan(result))
+    result = std::numeric_limits<float>::quiet_NaN();
+
   fpRegs_.writeSingle(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFsqrt_d(const DecodedInst* di)
+Hart<URV>::execFsqrt_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8238,21 +8919,26 @@ Core<URV>::execFsqrt_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double d1 = fpRegs_.read(di->op1());
   double res = std::sqrt(d1);
+  if (std::isnan(res))
+    res = std::numeric_limits<double>::quiet_NaN();
+
   fpRegs_.write(di->op0(), res);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFle_d(const DecodedInst* di)
+Hart<URV>::execFle_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8263,16 +8949,20 @@ Core<URV>::execFle_d(const DecodedInst* di)
   double d1 = fpRegs_.read(di->op1());
   double d2 = fpRegs_.read(di->op2());
 
-  URV res = (d1 <= d2)? 1 : 0;
-  intRegs_.write(di->op0(), res);
+  URV res = 0;
 
-  updateAccruedFpBits();
+  if (std::isnan(d1) or std::isnan(d2))
+    setInvalidInFcsr();
+  else
+    res = (d1 <= d2)? 1 : 0;
+
+  intRegs_.write(di->op0(), res);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFlt_d(const DecodedInst* di)
+Hart<URV>::execFlt_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8283,16 +8973,20 @@ Core<URV>::execFlt_d(const DecodedInst* di)
   double d1 = fpRegs_.read(di->op1());
   double d2 = fpRegs_.read(di->op2());
 
-  URV res = (d1 < d2)? 1 : 0;
-  intRegs_.write(di->op0(), res);
+  URV res = 0;
 
-  updateAccruedFpBits();
+  if (std::isnan(d1) or std::isnan(d2))
+    setInvalidInFcsr();
+  else
+    res = (d1 < d2)? 1 : 0;
+
+  intRegs_.write(di->op0(), res);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFeq_d(const DecodedInst* di)
+Hart<URV>::execFeq_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8303,16 +8997,23 @@ Core<URV>::execFeq_d(const DecodedInst* di)
   double d1 = fpRegs_.read(di->op1());
   double d2 = fpRegs_.read(di->op2());
 
-  URV res = (d1 == d2)? 1 : 0;
-  intRegs_.write(di->op0(), res);
+  URV res = 0;
 
-  updateAccruedFpBits();
+  if (std::isnan(d1) or std::isnan(d2))
+    {
+      if (issnan(d1) or issnan(d2))
+	setInvalidInFcsr();
+    }
+  else
+    res = (d1 == d2)? 1 : 0;
+
+  intRegs_.write(di->op0(), res);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_w_d(const DecodedInst* di)
+Hart<URV>::execFcvt_w_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8327,21 +9028,50 @@ Core<URV>::execFcvt_w_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double d1 = fpRegs_.read(di->op1());
-  SRV result = int32_t(d1);
+  SRV result = 0;
+  bool valid = false;
+
+  int32_t minInt = int32_t(1) << 31;
+  int32_t maxInt = (~uint32_t(0)) >> 1;
+
+  unsigned signBit = signOf(d1);
+  if (std::isinf(d1))
+    result = signBit? minInt : maxInt;
+  else if (std::isnan(d1))
+    result = maxInt;
+  else
+    {
+      double near = std::nearbyint(d1);
+      if (near > double(maxInt))
+	result = maxInt;
+      else if (near < double(minInt))
+	result = minInt;
+      else
+	{
+	  valid = true;
+	  result = SRV(int32_t(std::lrint(d1)));
+	}
+    }
+
   intRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (not valid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
+
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_wu_d(const DecodedInst* di)
+Hart<URV>::execFcvt_wu_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8356,21 +9086,49 @@ Core<URV>::execFcvt_wu_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double d1 = fpRegs_.read(di->op1());
-  URV result = uint32_t(d1);
+  SRV result = 0;
+  bool valid = false;
+
+  unsigned signBit = signOf(d1);
+  if (std::isinf(d1))
+    result = signBit? 0 : ~URV(0);
+  else if (std::isnan(d1))
+    result = ~URV(0);
+  else
+    {
+      if (signBit)
+	result = 0;
+      else
+	{
+	  double near = std::nearbyint(d1);
+	  if (near > double(~uint32_t(0)))
+	    result = ~URV(0);
+	  else
+	    {
+	      valid = true;
+	      result = SRV(int32_t(std::lrint(d1)));
+	    }
+	}
+    }
+
   intRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (not valid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_d_w(const DecodedInst* di)
+Hart<URV>::execFcvt_d_w(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8385,7 +9143,7 @@ Core<URV>::execFcvt_d_w(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   int32_t i1 = intRegs_.read(di->op1());
@@ -8393,13 +9151,15 @@ Core<URV>::execFcvt_d_w(const DecodedInst* di)
   fpRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_d_wu(const DecodedInst* di)
+Hart<URV>::execFcvt_d_wu(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8414,7 +9174,7 @@ Core<URV>::execFcvt_d_wu(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   uint32_t i1 = intRegs_.read(di->op1());
@@ -8422,13 +9182,15 @@ Core<URV>::execFcvt_d_wu(const DecodedInst* di)
   fpRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFclass_d(const DecodedInst* di)
+Hart<URV>::execFclass_d(const DecodedInst* di)
 {
   if (not isRvd())
     {
@@ -8483,9 +9245,17 @@ Core<URV>::execFclass_d(const DecodedInst* di)
 }
 
 
-template <typename URV>
+template <>
 void
-Core<URV>::execFcvt_l_d(const DecodedInst* di)
+Hart<uint32_t>::execFcvt_l_d(const DecodedInst*)
+{
+  illegalInst();  // fcvt.l.d not available in RV32
+}
+
+
+template <>
+void
+Hart<uint64_t>::execFcvt_l_d(const DecodedInst* di)
 {
   if (not isRv64() or not isRvd())
     {
@@ -8500,21 +9270,139 @@ Core<URV>::execFcvt_l_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   double f1 = fpRegs_.read(di->op1());
-  SRV result = SRV(f1);
+  SRV result = 0;
+  bool valid = false;
+
+  int64_t maxInt = (~uint64_t(0)) >> 1;
+  int64_t minInt = int64_t(1) << 63;
+
+  unsigned signBit = signOf(f1);
+  if (std::isinf(f1))
+    {
+      if (signBit)
+	result = minInt;
+      else
+	result = maxInt;
+    }
+  else if (std::isnan(f1))
+    result = maxInt;
+  else
+    {
+      double near = std::nearbyint(f1);
+
+      // Note "near > double(maxInt)" will not work because of
+      // rounding.
+      if (near >= double(uint64_t(1) << 63))
+	result = maxInt;
+      else if (near < double(minInt))
+	result = minInt;
+      else
+	{
+	  valid = true;
+	  result = std::lrint(f1);
+	}
+    }
+
   intRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+  if (not valid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
+}
+
+
+template <>
+void
+Hart<uint32_t>::execFcvt_lu_d(const DecodedInst*)
+{
+  illegalInst();  /// fcvt.lu.d is not available in RV32.
+}
+
+
+template <>
+void
+Hart<uint64_t>::execFcvt_lu_d(const DecodedInst* di)
+{
+  if (not isRv64() or not isRvd())
+    {
+      illegalInst();
+      return;
+    }
+
+  RoundingMode riscvMode = effectiveRoundingMode(di->roundingMode());
+  if (riscvMode >= RoundingMode::Invalid1)
+    {
+      illegalInst();
+      return;
+    }
+
+  clearSimulatorFpFlags();
+  int prevMode = setSimulatorRoundingMode(riscvMode);
+
+  double f1 = fpRegs_.read(di->op1());
+  uint64_t result = 0;
+  bool valid = false;
+
+  uint64_t maxUint = ~uint64_t(0);
+
+  unsigned signBit = signOf(f1);
+  if (std::isinf(f1))
+    {
+      if (signBit)
+	result = 0;
+      else
+	result = maxUint;
+    }
+  else if (std::isnan(f1))
+    result = maxUint;
+  else
+    {
+      if (signBit)
+	result = 0;
+      else
+	{
+	  double near = std::nearbyint(f1);
+	  // Using "near > maxUint" will not work beacuse of rounding.
+	  if (near >= 2*double(uint64_t(1)<<63))
+	    result = maxUint;
+	  else
+	    {
+	      valid = true;
+	      // std::llrint will produce an overflow if most sig bit
+	      // of result is 1 (it thinks there's an overflow).  We
+	      // compensate with the divide multiply by 2.
+	      if (f1 < (uint64_t(1) << 63))
+		result = std::llrint(f1);
+	      else
+		{
+		  result = std::llrint(f1/2);
+		  result *= 2;
+		}
+	    }
+	}
+    }
+
+  intRegs_.write(di->op0(), result);
+
+  updateAccruedFpBits();
+  if (not valid)
+    setInvalidInFcsr();
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_lu_d(const DecodedInst* di)
+Hart<URV>::execFcvt_d_l(const DecodedInst* di)
 {
   if (not isRv64() or not isRvd())
     {
@@ -8529,36 +9417,7 @@ Core<URV>::execFcvt_lu_d(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
-  int prevMode = setSimulatorRoundingMode(riscvMode);
-
-  double f1 = fpRegs_.read(di->op1());
-  URV result = URV(f1);
-  intRegs_.write(di->op0(), result);
-
-  updateAccruedFpBits();
-  std::fesetround(prevMode);
-}
-
-
-template <typename URV>
-void
-Core<URV>::execFcvt_d_l(const DecodedInst* di)
-{
-  if (not isRv64() or not isRvd())
-    {
-      illegalInst();
-      return;
-    }
-
-  RoundingMode riscvMode = effectiveRoundingMode(di->roundingMode());
-  if (riscvMode >= RoundingMode::Invalid1)
-    {
-      illegalInst();
-      return;
-    }
-
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   SRV i1 = intRegs_.read(di->op1());
@@ -8566,13 +9425,15 @@ Core<URV>::execFcvt_d_l(const DecodedInst* di)
   fpRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFcvt_d_lu(const DecodedInst* di)
+Hart<URV>::execFcvt_d_lu(const DecodedInst* di)
 {
   if (not isRv64() or not isRvd())
     {
@@ -8587,7 +9448,7 @@ Core<URV>::execFcvt_d_lu(const DecodedInst* di)
       return;
     }
 
-  feClearAllExceptions();
+  clearSimulatorFpFlags();
   int prevMode = setSimulatorRoundingMode(riscvMode);
 
   URV i1 = intRegs_.read(di->op1());
@@ -8595,13 +9456,15 @@ Core<URV>::execFcvt_d_lu(const DecodedInst* di)
   fpRegs_.write(di->op0(), result);
 
   updateAccruedFpBits();
-  std::fesetround(prevMode);
+
+  if (std::fegetround() != prevMode)
+    std::fesetround(prevMode);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execFmv_d_x(const DecodedInst* di)
+Hart<URV>::execFmv_d_x(const DecodedInst* di)
 {
   if (not isRv64() or not isRvd())
     {
@@ -8624,10 +9487,10 @@ Core<URV>::execFmv_d_x(const DecodedInst* di)
 }
 
 
-// In 32-bit cores, fmv_x_d is an illegal instruction.
+// In 32-bit harts, fmv_x_d is an illegal instruction.
 template <>
 void
-Core<uint32_t>::execFmv_x_d(const DecodedInst*)
+Hart<uint32_t>::execFmv_x_d(const DecodedInst*)
 {
   illegalInst();
 }
@@ -8635,7 +9498,7 @@ Core<uint32_t>::execFmv_x_d(const DecodedInst*)
 
 template <>
 void
-Core<uint64_t>::execFmv_x_d(const DecodedInst* di)
+Hart<uint64_t>::execFmv_x_d(const DecodedInst* di)
 {
   if (not isRv64() or not isRvd())
     {
@@ -8660,8 +9523,8 @@ Core<uint64_t>::execFmv_x_d(const DecodedInst* di)
 
 template <typename URV>
 template <typename LOAD_TYPE>
-void
-Core<URV>::loadReserve(uint32_t rd, uint32_t rs1)
+bool
+Hart<URV>::loadReserve(uint32_t rd, uint32_t rs1)
 {
   URV addr = intRegs_.read(rs1);
 
@@ -8675,64 +9538,71 @@ Core<URV>::loadReserve(uint32_t rd, uint32_t rs1)
     {
       typedef TriggerTiming Timing;
 
-      bool isLoad = true;
-      if (ldStAddrTriggerHit(addr, Timing::Before, isLoad, isInterruptEnabled()))
-        triggerTripped_ = true;
+      bool isLd = true;
+      if (ldStAddrTriggerHit(addr, Timing::Before, isLd, isInterruptEnabled()))
+	triggerTripped_ = true;
       if (triggerTripped_)
-        return;
+	return false;
     }
 
   // Unsigned version of LOAD_TYPE
   typedef typename std::make_unsigned<LOAD_TYPE>::type ULT;
 
-  // Misaligned load triggers an exception.
+  auto secCause = SecondaryCause::NONE;
   unsigned ldSize = sizeof(LOAD_TYPE);
-  constexpr unsigned alignMask = sizeof(LOAD_TYPE) - 1;
-  bool misal = addr & alignMask;
-  misalignedLdSt_ = misal;
-  if (misal)
+  auto cause = determineLoadException(rs1, addr, addr, ldSize, secCause);
+  if (cause != ExceptionCause::NONE)
     {
-      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, ldSize);
-      return;
+      if (cause == ExceptionCause::LOAD_ADDR_MISAL and
+	  misalAtomicCauseAccessFault_)
+        {
+          cause = ExceptionCause::LOAD_ACC_FAULT;
+          secCause = SecondaryCause::LOAD_ACC_AMO;
+        }
+      initiateLoadException(cause, addr, secCause);
+      return false;
     }
 
-  bool forceFail = forceAccessFail_;
-  if (amoIllegalOutsideDccm_ and not memory_.isAddrInDccm(addr))
-    forceFail = true;
+  // Address outside DCCM causes an exception (this is swerv specific).
+  bool fault = amoIllegalOutsideDccm_ and not memory_.isAddrInDccm(addr);
+
+  // Access must be naturally aligned.
+  if ((addr & (ldSize - 1)) != 0)
+    fault = true;
 
   ULT uval = 0;
-  if (not forceFail and memory_.read(addr, uval))
+  fault = fault or not memory_.read(addr, uval);
+  if (fault)
     {
-      URV value;
-      if constexpr (std::is_same<ULT, LOAD_TYPE>::value)
-        value = uval;
-      else
-        value = SRV(LOAD_TYPE(uval)); // Sign extend.
-
-      // Put entry in load queue with value of rd before this load.
-      if (loadQueueEnabled_)
-        putInLoadQueue(ldSize, addr, rd, peekIntReg(rd));
-
-      intRegs_.write(rd, value);
+      auto cause = ExceptionCause::LOAD_ACC_FAULT;
+      secCause = SecondaryCause::LOAD_ACC_AMO;
+      initiateLoadException(cause, addr, secCause);
+      return false;
     }
-  else
-    {
-      initiateLoadException(ExceptionCause::LOAD_ACC_FAULT, addr, ldSize);
-    }
+
+  URV value = uval;
+  if (not std::is_same<ULT, LOAD_TYPE>::value)
+    value = SRV(LOAD_TYPE(uval)); // Sign extend.
+
+  // Put entry in load queue with value of rd before this load.
+  if (loadQueueEnabled_)
+    putInLoadQueue(ldSize, addr, rd, peekIntReg(rd));
+
+  intRegs_.write(rd, value);
+
+  return true;
 }
 
 
 template <typename URV>
 void
-Core<URV>::execLr_w(const DecodedInst* di)
+Hart<URV>::execLr_w(const DecodedInst* di)
 {
-  loadReserve<int32_t>(di->op0(), di->op1());
-  if (hasException_ or triggerTripped_)
+  if (not loadReserve<int32_t>(di->op0(), di->op1()))
     return;
 
-  hasLr_ = true;
-  lrAddr_ = loadAddr_;
-  lrSize_ = 4;
+  std::lock_guard<std::mutex> lock(memory_.lrMutex_);
+  memory_.makeLr(localHartId_, loadAddr_, 4 /*size*/);
 }
 
 
@@ -8740,7 +9610,7 @@ Core<URV>::execLr_w(const DecodedInst* di)
 template <typename URV>
 template <typename STORE_TYPE>
 bool
-Core<URV>::storeConditional(URV addr, STORE_TYPE storeVal)
+Hart<URV>::storeConditional(unsigned rs1, URV addr, STORE_TYPE storeVal)
 {
   // ld/st-address or instruction-address triggers have priority over
   // ld/st access or misaligned exceptions.
@@ -8755,23 +9625,34 @@ Core<URV>::storeConditional(URV addr, STORE_TYPE storeVal)
   constexpr unsigned alignMask = sizeof(STORE_TYPE) - 1;
   bool misal = addr & alignMask;
   misalignedLdSt_ = misal;
-  if (misal)
+
+  auto secCause = SecondaryCause::NONE;
+  auto cause = determineStoreException(rs1, addr, addr, storeVal, secCause);
+  if (cause != ExceptionCause::NONE)
     {
       if (triggerTripped_)
         return false; // No exception if earlier trigger.
-      initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
+
+      if (cause == ExceptionCause::LOAD_ADDR_MISAL and
+	  misalAtomicCauseAccessFault_)
+        {
+          cause = ExceptionCause::LOAD_ACC_FAULT;
+          secCause = SecondaryCause::LOAD_ACC_AMO;
+        }
+      initiateStoreException(cause, addr, secCause);
       return false;
     }
 
-  if (amoIllegalOutsideDccm_ and not memory_.isAddrInDccm(addr))
+  if (misal or (amoIllegalOutsideDccm_ and not memory_.isAddrInDccm(addr)))
     {
       if (triggerTripped_)
-        return false;  // No exception if earlier trigger.
-      initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
+	return false;  // No exception if earlier trigger.
+      auto secCause = SecondaryCause::STORE_ACC_AMO;
+      initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr, secCause);
       return false;
     }
 
-  if (hasTrig and not forceAccessFail_ and memory_.checkWrite(addr, storeVal))
+  if (hasTrig and memory_.checkWrite(addr, storeVal))
     {
       // No exception: consider store-data  trigger
       if (ldStDataTriggerHit(storeVal, timing, isLoad, isInterruptEnabled()))
@@ -8780,14 +9661,10 @@ Core<URV>::storeConditional(URV addr, STORE_TYPE storeVal)
   if (triggerTripped_)
     return false;
 
-  if (not hasLr_ or addr != lrAddr_)
+  if (not memory_.hasLr(localHartId_, addr))
     return false;
 
-  bool forceFail = forceAccessFail_;
-  if (amoIllegalOutsideDccm_ and not memory_.isAddrInDccm(addr))
-    forceFail = true;
-
-  if (not forceFail and memory_.write(addr, storeVal))
+  if (memory_.write(localHartId_, addr, storeVal))
     {
       invalidateDecodeCache(addr, sizeof(STORE_TYPE));
 
@@ -8808,45 +9685,39 @@ Core<URV>::storeConditional(URV addr, STORE_TYPE storeVal)
 #endif
         }
 
-      if (maxStoreQueueSize_)
-        {
-          uint64_t prevVal = 0;
-          memory_.getLastWriteOldValue(prevVal);
-          putInStoreQueue(sizeof(STORE_TYPE), addr, storeVal, prevVal);
-        }
       return true;
     }
-  else
-    {
-      initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr);
-    }
 
+  secCause = SecondaryCause::STORE_ACC_AMO;
+  initiateStoreException(ExceptionCause::STORE_ACC_FAULT, addr, secCause);
   return false;
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSc_w(const DecodedInst* di)
+Hart<URV>::execSc_w(const DecodedInst* di)
 {
-  uint32_t rs1 = di->op1();
+  std::lock_guard<std::mutex> lock(memory_.lrMutex_);
 
+  uint32_t rs1 = di->op1();
   URV value = intRegs_.read(di->op2());
   URV addr = intRegs_.read(rs1);
 
-  if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-    return;
+  uint64_t prevCount = exceptionCount_;
 
-  if (storeConditional(addr, uint32_t(value)))
+  bool ok = storeConditional(rs1, addr, uint32_t(value));
+  memory_.invalidateLr(localHartId_);
+  memory_.invalidateOtherHartLr(localHartId_, addr, 4);
+
+  if (ok)
     {
-      hasLr_ = false;
       intRegs_.write(di->op0(), 0); // success
       return;
     }
 
-  hasLr_ = false;
-
-  if (hasException_ or triggerTripped_)
+  // If exception or trigger tripped then rd is not modified.
+  if (triggerTripped_ or exceptionCount_ != prevCount)
     return;
 
   intRegs_.write(di->op0(), 1);  // fail
@@ -8855,7 +9726,7 @@ Core<URV>::execSc_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoadd_w(const DecodedInst* di)
+Hart<URV>::execAmoadd_w(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -8874,10 +9745,7 @@ Core<URV>::execAmoadd_w(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val + rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-        return;
-
-      bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
+      bool storeOk = store<uint32_t>(rs1, addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -8887,7 +9755,7 @@ Core<URV>::execAmoadd_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoswap_w(const DecodedInst* di)
+Hart<URV>::execAmoswap_w(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -8906,10 +9774,7 @@ Core<URV>::execAmoswap_w(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-        return;
-
-      bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
+      bool storeOk = store<uint32_t>(rs1, addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -8919,7 +9784,7 @@ Core<URV>::execAmoswap_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoxor_w(const DecodedInst* di)
+Hart<URV>::execAmoxor_w(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -8938,10 +9803,7 @@ Core<URV>::execAmoxor_w(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val ^ rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-        return;
-
-      bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
+      bool storeOk = store<uint32_t>(rs1, addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -8951,7 +9813,7 @@ Core<URV>::execAmoxor_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoor_w(const DecodedInst* di)
+Hart<URV>::execAmoor_w(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -8970,10 +9832,7 @@ Core<URV>::execAmoor_w(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val | rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-        return;
-  
-      bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
+      bool storeOk = store<uint32_t>(rs1, addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -8983,7 +9842,7 @@ Core<URV>::execAmoor_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoand_w(const DecodedInst* di)
+Hart<URV>::execAmoand_w(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9002,10 +9861,7 @@ Core<URV>::execAmoand_w(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val & rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-        return;
-
-      bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
+      bool storeOk = store<uint32_t>(rs1, addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9015,7 +9871,7 @@ Core<URV>::execAmoand_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmomin_w(const DecodedInst* di)
+Hart<URV>::execAmomin_w(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9035,10 +9891,7 @@ Core<URV>::execAmomin_w(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = (SRV(rs2Val) < SRV(rdVal))? rs2Val : rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-        return;
-
-      bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
+      bool storeOk = store<uint32_t>(rs1, addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9048,7 +9901,7 @@ Core<URV>::execAmomin_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmominu_w(const DecodedInst* di)
+Hart<URV>::execAmominu_w(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9069,10 +9922,7 @@ Core<URV>::execAmominu_w(const DecodedInst* di)
       uint32_t w1 = uint32_t(rs2Val), w2 = uint32_t(rdVal);
       uint32_t result = (w1 < w2)? w1 : w2;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-        return;
-
-      bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
+      bool storeOk = store<uint32_t>(rs1, addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9082,7 +9932,7 @@ Core<URV>::execAmominu_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmomax_w(const DecodedInst* di)
+Hart<URV>::execAmomax_w(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9101,10 +9951,7 @@ Core<URV>::execAmomax_w(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = (SRV(rs2Val) > SRV(rdVal))? rs2Val : rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-        return;
-
-      bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
+      bool storeOk = store<uint32_t>(rs1, addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9114,7 +9961,7 @@ Core<URV>::execAmomax_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmomaxu_w(const DecodedInst* di)
+Hart<URV>::execAmomaxu_w(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9136,10 +9983,7 @@ Core<URV>::execAmomaxu_w(const DecodedInst* di)
 
       URV result = (w1 > w2)? w1 : w2;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 4))
-        return;
-
-      bool storeOk = store<uint32_t>(addr, addr, uint32_t(result));
+      bool storeOk = store<uint32_t>(rs1, addr, addr, uint32_t(result));
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9149,37 +9993,40 @@ Core<URV>::execAmomaxu_w(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execLr_d(const DecodedInst* di)
+Hart<URV>::execLr_d(const DecodedInst* di)
 {
-  loadReserve<int64_t>(di->op0(), di->op1());
-  if (hasException_ or triggerTripped_)
+  if (not loadReserve<int64_t>(di->op0(), di->op1()))
     return;
 
-  hasLr_ = true;
-  lrAddr_ = loadAddr_;
-  lrSize_ = 8;
+  std::lock_guard<std::mutex> lock(memory_.lrMutex_);
+  memory_.makeLr(localHartId_, loadAddr_, 8 /*size*/);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSc_d(const DecodedInst* di)
+Hart<URV>::execSc_d(const DecodedInst* di)
 {
-  uint32_t rs1 = di->op1();
+  std::lock_guard<std::mutex> lock(memory_.lrMutex_);
 
+  uint32_t rs1 = di->op1();
   URV value = intRegs_.read(di->op2());
   URV addr = intRegs_.read(rs1);
 
-  if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-    return;
+  uint64_t prevCount = exceptionCount_;
 
-  if (storeConditional(addr, uint64_t(value)))
+  bool ok = storeConditional(rs1, addr, uint64_t(value));
+  memory_.invalidateLr(localHartId_);
+  memory_.invalidateOtherHartLr(localHartId_, addr, 8);
+
+  if (ok)
     {
       intRegs_.write(di->op0(), 0); // success
       return;
     }
 
-  if (hasException_ or triggerTripped_)
+  // If exception or trigger tripped then rd is not modified.
+  if (triggerTripped_ or exceptionCount_ != prevCount)
     return;
 
   intRegs_.write(di->op0(), 1);  // fail
@@ -9188,7 +10035,7 @@ Core<URV>::execSc_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoadd_d(const DecodedInst* di)
+Hart<URV>::execAmoadd_d(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9205,10 +10052,7 @@ Core<URV>::execAmoadd_d(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val + rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-        return;
-
-      bool storeOk = store<uint32_t>(addr, addr, result);
+      bool storeOk = store<uint32_t>(rs1, addr, addr, result);
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9218,7 +10062,7 @@ Core<URV>::execAmoadd_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoswap_d(const DecodedInst* di)
+Hart<URV>::execAmoswap_d(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9235,10 +10079,7 @@ Core<URV>::execAmoswap_d(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-        return;
-
-      bool storeOk = store<URV>(addr, addr, result);
+      bool storeOk = store<URV>(rs1, addr, addr, result);
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9248,7 +10089,7 @@ Core<URV>::execAmoswap_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoxor_d(const DecodedInst* di)
+Hart<URV>::execAmoxor_d(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9265,10 +10106,7 @@ Core<URV>::execAmoxor_d(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val ^ rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-        return;
-
-      bool storeOk = store<URV>(addr, addr, result);
+      bool storeOk = store<URV>(rs1, addr, addr, result);
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9278,7 +10116,7 @@ Core<URV>::execAmoxor_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoor_d(const DecodedInst* di)
+Hart<URV>::execAmoor_d(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9295,10 +10133,7 @@ Core<URV>::execAmoor_d(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val | rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-        return;
-
-      bool storeOk = store<URV>(addr, addr, result);
+      bool storeOk = store<URV>(rs1, addr, addr, result);
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9308,7 +10143,7 @@ Core<URV>::execAmoor_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmoand_d(const DecodedInst* di)
+Hart<URV>::execAmoand_d(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9325,10 +10160,7 @@ Core<URV>::execAmoand_d(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = rs2Val & rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-        return;
-
-      bool storeOk = store<URV>(addr, addr, result);
+      bool storeOk = store<URV>(rs1, addr, addr, result);
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9338,7 +10170,7 @@ Core<URV>::execAmoand_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmomin_d(const DecodedInst* di)
+Hart<URV>::execAmomin_d(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9355,10 +10187,7 @@ Core<URV>::execAmomin_d(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = (SRV(rs2Val) < SRV(rdVal))? rs2Val : rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-        return;
-
-      bool storeOk = store<URV>(addr, addr, result);
+      bool storeOk = store<URV>(rs1, addr, addr, result);
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9368,7 +10197,7 @@ Core<URV>::execAmomin_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmominu_d(const DecodedInst* di)
+Hart<URV>::execAmominu_d(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9385,10 +10214,7 @@ Core<URV>::execAmominu_d(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = (rs2Val < rdVal)? rs2Val : rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-        return;
-
-      bool storeOk = store<URV>(addr, addr, result);
+      bool storeOk = store<URV>(rs1, addr, addr, result);
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9398,7 +10224,7 @@ Core<URV>::execAmominu_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmomax_d(const DecodedInst* di)
+Hart<URV>::execAmomax_d(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9415,10 +10241,7 @@ Core<URV>::execAmomax_d(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = (SRV(rs2Val) > SRV(rdVal))? rs2Val : rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-        return;
-
-      bool storeOk = store<URV>(addr, addr, result);
+      bool storeOk = store<URV>(rs1, addr, addr, result);
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9428,7 +10251,7 @@ Core<URV>::execAmomax_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAmomaxu_d(const DecodedInst* di)
+Hart<URV>::execAmomaxu_d(const DecodedInst* di)
 {
   // Lock mutex to serialize AMO instructions. Unlock automatically on
   // exit from this scope.
@@ -9445,10 +10268,7 @@ Core<URV>::execAmomaxu_d(const DecodedInst* di)
       URV rs2Val = intRegs_.read(di->op2());
       URV result = (rs2Val > rdVal)? rs2Val : rdVal;
 
-      if (checkStackAccess_ and rs1 == RegSp and not checkStackStore(addr, 8))
-        return;
-
-      bool storeOk = store<URV>(addr, addr, result);
+      bool storeOk = store<URV>(rs1, addr, addr, result);
 
       if (storeOk and not triggerTripped_)
         intRegs_.write(di->op0(), rdVal);
@@ -9458,7 +10278,7 @@ Core<URV>::execAmomaxu_d(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execClz(const DecodedInst* di)
+Hart<URV>::execClz(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9484,7 +10304,7 @@ Core<URV>::execClz(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execCtz(const DecodedInst* di)
+Hart<URV>::execCtz(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9505,7 +10325,7 @@ Core<URV>::execCtz(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execPcnt(const DecodedInst* di)
+Hart<URV>::execPcnt(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9521,7 +10341,7 @@ Core<URV>::execPcnt(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execAndn(const DecodedInst* di)
+Hart<URV>::execAndn(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9538,7 +10358,7 @@ Core<URV>::execAndn(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execOrn(const DecodedInst* di)
+Hart<URV>::execOrn(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9555,7 +10375,7 @@ Core<URV>::execOrn(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execXnor(const DecodedInst* di)
+Hart<URV>::execXnor(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9572,7 +10392,7 @@ Core<URV>::execXnor(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSlo(const DecodedInst* di)
+Hart<URV>::execSlo(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9591,7 +10411,7 @@ Core<URV>::execSlo(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSro(const DecodedInst* di)
+Hart<URV>::execSro(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9610,7 +10430,7 @@ Core<URV>::execSro(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSloi(const DecodedInst* di)
+Hart<URV>::execSloi(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9630,7 +10450,7 @@ Core<URV>::execSloi(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSroi(const DecodedInst* di)
+Hart<URV>::execSroi(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9650,7 +10470,7 @@ Core<URV>::execSroi(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execMin(const DecodedInst* di)
+Hart<URV>::execMin(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9667,7 +10487,7 @@ Core<URV>::execMin(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execMax(const DecodedInst* di)
+Hart<URV>::execMax(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9684,7 +10504,7 @@ Core<URV>::execMax(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execMinu(const DecodedInst* di)
+Hart<URV>::execMinu(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9701,7 +10521,7 @@ Core<URV>::execMinu(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execMaxu(const DecodedInst* di)
+Hart<URV>::execMaxu(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9718,7 +10538,7 @@ Core<URV>::execMaxu(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execRol(const DecodedInst* di)
+Hart<URV>::execRol(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9738,7 +10558,7 @@ Core<URV>::execRol(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execRor(const DecodedInst* di)
+Hart<URV>::execRor(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9758,7 +10578,7 @@ Core<URV>::execRor(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execRori(const DecodedInst* di)
+Hart<URV>::execRori(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9779,7 +10599,7 @@ Core<URV>::execRori(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execRev8(const DecodedInst* di)
+Hart<URV>::execRev8(const DecodedInst* di)
 {
   // Byte swap.
 
@@ -9802,7 +10622,7 @@ Core<URV>::execRev8(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execRev(const DecodedInst* di)
+Hart<URV>::execRev(const DecodedInst* di)
 {
   // Bit reverse.
 
@@ -9835,7 +10655,7 @@ Core<URV>::execRev(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execPack(const DecodedInst* di)
+Hart<URV>::execPack(const DecodedInst* di)
 {
   if (not isRvzbb())
     {
@@ -9844,8 +10664,8 @@ Core<URV>::execPack(const DecodedInst* di)
     }
 
   unsigned halfXlen = sizeof(URV)*4;
-  URV upper = intRegs_.read(di->op1()) << halfXlen;
-  URV lower = (intRegs_.read(di->op2()) << halfXlen) >> halfXlen;
+  URV lower = (intRegs_.read(di->op1()) << halfXlen) >> halfXlen;
+  URV upper = intRegs_.read(di->op2()) << halfXlen;
   URV res = upper | lower;
   intRegs_.write(di->op0(), res);
 }
@@ -9853,9 +10673,9 @@ Core<URV>::execPack(const DecodedInst* di)
 
 template <typename URV>
 void
-Core<URV>::execSbset(const DecodedInst* di)
+Hart<URV>::execSbset(const DecodedInst* di)
 {
-  if (not isRvzbb())
+  if (not isRvzbs())
     {
       illegalInst();
       return;
@@ -9865,15 +10685,15 @@ Core<URV>::execSbset(const DecodedInst* di)
   unsigned bitIx = intRegs_.read(di->op2()) & mask;
 
   URV value = intRegs_.read(di->op1()) | (URV(1) << bitIx);
-  intRegs_.write(di->op2(), value);
+  intRegs_.write(di->op0(), value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSbclr(const DecodedInst* di)
+Hart<URV>::execSbclr(const DecodedInst* di)
 {
-  if (not isRvzbb())
+  if (not isRvzbs())
     {
       illegalInst();
       return;
@@ -9883,15 +10703,15 @@ Core<URV>::execSbclr(const DecodedInst* di)
   unsigned bitIx = intRegs_.read(di->op2()) & mask;
 
   URV value = intRegs_.read(di->op1()) & ~(URV(1) << bitIx);
-  intRegs_.write(di->op2(), value);
+  intRegs_.write(di->op0(), value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSbinv(const DecodedInst* di)
+Hart<URV>::execSbinv(const DecodedInst* di)
 {
-  if (not isRvzbb())
+  if (not isRvzbs())
     {
       illegalInst();
       return;
@@ -9901,15 +10721,15 @@ Core<URV>::execSbinv(const DecodedInst* di)
   unsigned bitIx = intRegs_.read(di->op2()) & mask;
 
   URV value = intRegs_.read(di->op1()) ^ (URV(1) << bitIx);
-  intRegs_.write(di->op2(), value);
+  intRegs_.write(di->op0(), value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSbext(const DecodedInst* di)
+Hart<URV>::execSbext(const DecodedInst* di)
 {
-  if (not isRvzbb())
+  if (not isRvzbs())
     {
       illegalInst();
       return;
@@ -9919,13 +10739,13 @@ Core<URV>::execSbext(const DecodedInst* di)
   unsigned bitIx = intRegs_.read(di->op2()) & mask;
 
   URV value = (intRegs_.read(di->op1()) >> bitIx) & 1;
-  intRegs_.write(di->op2(), value);
+  intRegs_.write(di->op0(), value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSbseti(const DecodedInst* di)
+Hart<URV>::execSbseti(const DecodedInst* di)
 {
   if (not isRvzbs())
     {
@@ -9938,13 +10758,13 @@ Core<URV>::execSbseti(const DecodedInst* di)
     return;
 
   URV value = intRegs_.read(di->op1()) | (URV(1) << bitIx);
-  intRegs_.write(di->op2(), value);
+  intRegs_.write(di->op0(), value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSbclri(const DecodedInst* di)
+Hart<URV>::execSbclri(const DecodedInst* di)
 {
   if (not isRvzbs())
     {
@@ -9957,13 +10777,13 @@ Core<URV>::execSbclri(const DecodedInst* di)
     return;
 
   URV value = intRegs_.read(di->op1()) & ~(URV(1) << bitIx);
-  intRegs_.write(di->op2(), value);
+  intRegs_.write(di->op0(), value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSbinvi(const DecodedInst* di)
+Hart<URV>::execSbinvi(const DecodedInst* di)
 {
   if (not isRvzbs())
     {
@@ -9976,13 +10796,13 @@ Core<URV>::execSbinvi(const DecodedInst* di)
     return;
 
   URV value = intRegs_.read(di->op1()) ^ (URV(1) << bitIx);
-  intRegs_.write(di->op2(), value);
+  intRegs_.write(di->op0(), value);
 }
 
 
 template <typename URV>
 void
-Core<URV>::execSbexti(const DecodedInst* di)
+Hart<URV>::execSbexti(const DecodedInst* di)
 {
   if (not isRvzbs())
     {
@@ -9995,9 +10815,9 @@ Core<URV>::execSbexti(const DecodedInst* di)
     return;
 
   URV value = (intRegs_.read(di->op1()) >> bitIx) & 1;
-  intRegs_.write(di->op2(), value);
+  intRegs_.write(di->op0(), value);
 }
 
 
-template class WdRiscv::Core<uint32_t>;
-template class WdRiscv::Core<uint64_t>;
+template class WdRiscv::Hart<uint32_t>;
+template class WdRiscv::Hart<uint64_t>;

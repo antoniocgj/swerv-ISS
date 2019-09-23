@@ -16,12 +16,12 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-#include <stdio.h>
-#include <signal.h>
+#include <cstdio>
+#include <csignal>
 #include <iostream>
 #include <sstream>
 #include <boost/format.hpp>
-#include "Core.hpp"
+#include "Hart.hpp"
 
 #ifdef __MINGW64__
 #define SIGTRAP 5
@@ -340,7 +340,7 @@ hexToInt(const std::string& str, T& value)
 
 template <typename URV>
 void
-handlePeekRegisterForGdb(WdRiscv::Core<URV>& core, unsigned regNum,
+handlePeekRegisterForGdb(WdRiscv::Hart<URV>& hart, unsigned regNum,
 			 std::ostream& stream)
 {
   // Not documented but GBD uses indices 0-31 for integer registers,
@@ -349,17 +349,17 @@ handlePeekRegisterForGdb(WdRiscv::Core<URV>& core, unsigned regNum,
   unsigned fpRegOffset = 33, pcOffset = 32, csrOffset = 65;
   URV value = 0; bool ok = true, fp = false;
   if (regNum < pcOffset)
-    ok = core.peekIntReg(regNum, value);
+    ok = hart.peekIntReg(regNum, value);
   else if (regNum == pcOffset)
-    value = core.peekPc();
+    value = hart.peekPc();
   else if (regNum >= fpRegOffset and regNum < csrOffset)
     {
       fp = true;
-      if (core.isRvf() or core.isRvd())
+      if (hart.isRvf() or hart.isRvd())
 	{
 	  unsigned fpReg = regNum - fpRegOffset;
 	  uint64_t val64 = 0;
-	  ok = core.peekFpReg(fpReg, val64);
+	  ok = hart.peekFpReg(fpReg, val64);
 	  if (ok)
 	    stream << littleEndianIntToHex(val64);
 	}
@@ -369,7 +369,7 @@ handlePeekRegisterForGdb(WdRiscv::Core<URV>& core, unsigned regNum,
   else
     {
       URV csr = regNum - csrOffset;
-      ok = core.peekCsr(WdRiscv::CsrNumber(csr), value);
+      ok = hart.peekCsr(WdRiscv::CsrNumber(csr), value);
     }
 
   if (ok)
@@ -386,7 +386,7 @@ handlePeekRegisterForGdb(WdRiscv::Core<URV>& core, unsigned regNum,
 // stop.  Return the signal number corresponding to the exception.
 template <typename URV>
 unsigned
-notifyGdbAfterStop(WdRiscv::Core<URV>& core)
+notifyGdbAfterStop(WdRiscv::Hart<URV>& hart)
 {
   // Construct a reply of the form T xx n1:r1;n2:r2;... where xx is
   // the trap cause and ni is a resource (e.g. register number) and ri
@@ -395,7 +395,7 @@ notifyGdbAfterStop(WdRiscv::Core<URV>& core)
 
   unsigned signalNum = SIGTRAP;
   URV cause = 0;
-  if (core.peekCsr(WdRiscv::CsrNumber::MCAUSE, cause))
+  if (hart.peekCsr(WdRiscv::CsrNumber::MCAUSE, cause))
     {
       if (cause == URV(WdRiscv::ExceptionCause::BREAKP))
 	signalNum = SIGTRAP;
@@ -406,7 +406,7 @@ notifyGdbAfterStop(WdRiscv::Core<URV>& core)
 
   URV spVal = 0;
   unsigned spNum = WdRiscv::RegSp;
-  core.peekIntReg(spNum, spVal);
+  hart.peekIntReg(spNum, spVal);
   reply << (boost::format("%02x") % spNum) << ':'
 	<< littleEndianIntToHex(spVal) << ';';
   sendPacketToGdb(reply.str());
@@ -417,11 +417,11 @@ notifyGdbAfterStop(WdRiscv::Core<URV>& core)
 
 template <typename URV>
 void
-handleExceptionForGdb(WdRiscv::Core<URV>& core)
+handleExceptionForGdb(WdRiscv::Hart<URV>& hart)
 {
   // The trap handler is expected to set the PC to point to the instruction
   // after the one with the exception if necessary/possible.
-  unsigned signalNum = notifyGdbAfterStop(core);
+  unsigned signalNum = notifyGdbAfterStop(hart);
 
   bool gotQuit = false;
 
@@ -445,10 +445,10 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core)
 
 	case 'g':  // return the value of the CPU registers
 	  {
-	    for (unsigned i = 0; i < core.intRegCount(); ++i)
+	    for (unsigned i = 0; i < hart.intRegCount(); ++i)
 	      {
 		URV val = 0;
-		core.peekIntReg(i, val);
+		hart.peekIntReg(i, val);
 		reply << littleEndianIntToHex(val);
 	      }
 	  }
@@ -458,19 +458,19 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core)
 	  {
 	    std::string status = "OK";
 	    size_t len = packet.length();
-	    if (len + 1 < core.intRegCount() * sizeof(URV) * 2)
+	    if (len + 1 < hart.intRegCount() * sizeof(URV) * 2)
 	      status = "E01";
 	    else
 	      {
 		const char* ptr = packet.c_str() + 1;
-		for (unsigned i = 0; i < core.intRegCount(); ++i)
+		for (unsigned i = 0; i < hart.intRegCount(); ++i)
 		  {
 		    std::string buffer;
 		    for (unsigned i = 0; i < 2*sizeof(URV); ++i)
 		      buffer += *ptr++;
 		    URV val = 0;
 		    if (littleEndianHexToInt(buffer, val))
-		      core.pokeIntReg(i, val);
+		      hart.pokeIntReg(i, val);
 		    else
 		      {
 			status  = "E01";
@@ -517,7 +517,7 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core)
 		    for (URV ix = 0; ix < len; ++ix)
 		      {
 			uint8_t byte = 0;
-			core.peekMemory(addr++, byte);
+			hart.peekMemory(addr++, byte);
 			reply << (boost::format("%02x") % unsigned(byte));
 		      }
 		  }
@@ -546,7 +546,7 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core)
 			  {
 			    int bb = hexCharToInt(data.at(2*ix));
 			    bb = (bb << 4) | hexCharToInt(data.at(2*ix+1));
-			    core.pokeMemory(addr++, static_cast<uint8_t>(bb));
+			    hart.pokeMemory(addr++, static_cast<uint8_t>(bb));
 			  }
 			reply << "OK";
 		      }
@@ -563,7 +563,7 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core)
 	    URV newPc = 0;
 	    if (hexToInt(packet.substr(1), newPc))
 	      {
-		core.pokePc(newPc);
+		hart.pokePc(newPc);
 		return;
 	      }
 
@@ -579,7 +579,7 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core)
 	    if (not hexToInt(regNumStr, regNum))
 	      reply << "E01";
 	    else
-	      handlePeekRegisterForGdb(core, regNum, reply);
+	      handlePeekRegisterForGdb(hart, regNum, reply);
 	  }
 	  break;
 
@@ -601,12 +601,12 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core)
 		else
 		  {
 		    bool ok = true;
-		    if (regNum < core.intRegCount())
-		      ok = core.pokeIntReg(regNum, value);
-		    else if (regNum == core.intRegCount())
-		      core.pokePc(value);
+		    if (regNum < hart.intRegCount())
+		      ok = hart.pokeIntReg(regNum, value);
+		    else if (regNum == hart.intRegCount())
+		      hart.pokePc(value);
 		    else
-		      ok = core.pokeCsr(WdRiscv::CsrNumber(regNum), value);
+		      ok = hart.pokeCsr(WdRiscv::CsrNumber(regNum), value);
 		    reply << (ok? "OK" : "E04");
 		  }
 	      }
@@ -614,8 +614,8 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core)
 	  break;
 
 	case 's':
-	  core.singleStep(nullptr);
-	  notifyGdbAfterStop(core);
+	  hart.singleStep(nullptr);
+	  notifyGdbAfterStop(hart);
 	  continue;
 	  break;
 
@@ -679,5 +679,5 @@ handleExceptionForGdb(WdRiscv::Core<URV>& core)
 }
 
 
-template void handleExceptionForGdb<uint32_t>(WdRiscv::Core<uint32_t>&);
-template void handleExceptionForGdb<uint64_t>(WdRiscv::Core<uint64_t>&);
+template void handleExceptionForGdb<uint32_t>(WdRiscv::Hart<uint32_t>&);
+template void handleExceptionForGdb<uint64_t>(WdRiscv::Hart<uint64_t>&);

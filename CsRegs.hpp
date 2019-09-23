@@ -22,6 +22,7 @@
 #include <vector>
 #include <unordered_map>
 #include <string>
+#include <functional>
 #include "Triggers.hpp"
 #include "PerfRegs.hpp"
 
@@ -62,7 +63,8 @@ namespace WdRiscv
       M_ENV_CALL        = 11, // Environment call from machine mode
       INST_PAGE_FAULT   = 12, // Instruction page fault
       LOAD_PAGE_FAULT   = 13, // Load page fault
-      STORE_PAGE_FAULT  = 15  // Store page fault
+      STORE_PAGE_FAULT  = 15, // Store page fault
+      NONE
     };
 
   /// Non-maskable interrupt cause.
@@ -75,6 +77,50 @@ namespace WdRiscv
       DCCM_ACCESS_ERROR     = 0xf0001001,
       NON_DCCM_ACCESS_ERROR = 0xf0001002
     };
+
+  /// Secondary exception cause values (WD special).
+  enum class SecondaryCause : uint32_t
+    {
+      NONE = 0,
+
+      // Cause = INST_ACC_FAULT
+      INST_BUS_ERROR = 0,
+      INST_DOUBLE_ECC = 1,
+      INST_LOCAL_UNMAPPED = 2,
+      INST_MEM_PROTECTION = 3,
+
+      // Cause = BREAKP
+      TRIGGER_HIT = 1,
+
+      // Cause = LOAD_ADDR_MISAL
+      LOAD_MISAL_REGION_CROSS = 0,
+      LOAD_MISAL_IO = 1,
+
+      // Cause = LOAD_ACC_FAULT
+      LOAD_ACC_LOCAL_UNMAPPED = 0,
+      LOAD_ACC_DOUBLE_ECC = 1,
+      LOAD_ACC_STACK_CHECK = 2,
+      LOAD_ACC_MEM_PROTECTION = 3,
+      LOAD_ACC_64BIT = 4,
+      LOAD_ACC_REGION_PREDICTION = 5,
+      LOAD_ACC_PIC = 6,
+      LOAD_ACC_AMO = 7,
+
+      // Cause = STORE_ADDR_MISAL
+      STORE_MISAL_REGION_CROSS = 0,
+      STORE_MISAL_IO = 1,
+
+      // Cause = STORE_ACC_FAULT
+      STORE_ACC_LOCAL_UNMAPPED = 0,
+      STORE_ACC_DOUBLE_ECC = 1,
+      STORE_ACC_STACK_CHECK = 2,
+      STORE_ACC_MEM_PROTECTION = 3,
+      STORE_ACC_64BIT = 4,
+      STORE_ACC_REGION_PREDICTION = 5,
+      STORE_ACC_PIC = 6,
+      STORE_ACC_AMO = 7
+    };
+
 
   /// Reason for entering debug mode (value stored in cause field
   /// of dcsr)
@@ -106,6 +152,7 @@ namespace WdRiscv
       MIE = 0x304,
       MTVEC = 0x305,
       MCOUNTEREN = 0x306,
+      MCOUNTINHIBIT = 0x320,
 
       // Machine trap handling
       MSCRATCH = 0x340,
@@ -363,6 +410,8 @@ namespace WdRiscv
       MDBAC   = 0xbc1,  // D-Bus 64-bit access control
       MDBHD   = 0xbc7,  // D-Bus 64-bit high data
 
+      MSCAUSE  = 0x7ff, // Secondary exception cause
+
       MAX_CSR_ = 0xfff,
       MIN_CSR_ = 0      // csr with smallest number
     };
@@ -435,21 +484,9 @@ namespace WdRiscv
     bool isDebug() const
     { return debug_; }
 
-    /// Set the value of this register to the given value x honoring
-    /// the write mask (defined at construction): Set the ith bit of
-    /// this register to the ith bit of the given value x if the ith
-    /// bit of the write mask is 1; otherwise, leave the ith bit
-    /// unmodified. This is the interface used by the CSR
-    /// instructions.
-    void write(URV x)
-    {
-      if (not hasPrev_)
-	{
-	  prev_ = *valuePtr_;
-	  hasPrev_ = true;
-	}
-      *valuePtr_ = (x & writeMask_) | (*valuePtr_ & ~writeMask_);
-    }
+    /// Return true if this register is shared between harts.
+    bool isShared() const
+    { return shared_; }
 
     /// Return the current value of this register.
     URV read() const
@@ -483,10 +520,34 @@ namespace WdRiscv
     const std::string& getName() const
     { return name_; }
 
+    /// Register a pre-poke call back which will get invoked with CSR and
+    /// poked value.
+    void registerPrePoke(std::function<void(Csr<URV>&, URV&)> func)
+    { prePoke_.push_back(func); }
+
+    /// Register a pre-write call back which will get invoked with
+    /// CSR and written value.
+    void registerPreWrite(std::function<void(Csr<URV>&, URV&)> func)
+    { preWrite_.push_back(func); }
+
+    /// Register a post-poke call back which will get invoked with CSR and
+    /// poked value.
+    void registerPostPoke(std::function<void(Csr<URV>&, URV)> func)
+    { postPoke_.push_back(func); }
+
+    /// Register a post-write call back which will get invoked with
+    /// CSR and written value.
+    void registerPostWrite(std::function<void(Csr<URV>&, URV)> func)
+    { postWrite_.push_back(func); }
+
+    /// Register a post-reset call back.
+    void registerPostReset(std::function<void(Csr<URV>&)> func)
+    { postReset_.push_back(func); }
+
   protected:
 
     friend class CsRegs<URV>;
-    friend class Core<URV>;
+    friend class Hart<URV>;
 
     void operator=(const Csr<URV>& other) = delete;
 
@@ -494,16 +555,15 @@ namespace WdRiscv
     /// previous value of the CSR is lost. If given location is null
     /// then the default location defined in this object is restored.
     void tie(URV* location)
-    {
-      if (not location)
-	valuePtr_ = &value_;
-      else
-	valuePtr_ = location;
-    }
+    { valuePtr_ = location ? location : &value_; }
 
     /// Reset to initial (power-on) value.
     void reset()
-    { *valuePtr_ = initialValue_; }
+    {
+      *valuePtr_ = initialValue_;
+      for (auto func : postReset_)
+        func(*this);
+    }
 
     /// Configure.
     void config(const std::string& name, CsrNumber num, bool mandatory,
@@ -528,6 +588,10 @@ namespace WdRiscv
     void setIsDebug(bool flag)
     { debug_ = flag; }
 
+    /// Mark regiser as shared between harts.
+    void setIsShared(bool flag)
+    { shared_ = flag; }
+
     void setImplemented(bool flag)
     { implemented_ = flag; }
 
@@ -546,12 +610,44 @@ namespace WdRiscv
     void setWriteMask(URV mask)
     { writeMask_ = mask; }
 
+    /// Set the value of this register to the given value x honoring
+    /// the write mask (defined at construction): Set the ith bit of
+    /// this register to the ith bit of the given value x if the ith
+    /// bit of the write mask is 1; otherwise, leave the ith bit
+    /// unmodified. This is the interface used by the CSR
+    /// instructions.
+    void write(URV x)
+    {
+      if (not hasPrev_)
+	{
+	  prev_ = *valuePtr_;
+	  hasPrev_ = true;
+	}
+      for (auto func : preWrite_)
+        func(*this, x);
+
+      URV newVal = (x & writeMask_) | (*valuePtr_ & ~writeMask_);
+      *valuePtr_ = newVal;
+
+      for (auto func : postWrite_)
+        func(*this, newVal);
+    }
+
     /// Similar to the write method but using the poke mask instead of
     /// the write mask. This is the interface used by non-csr
     /// instructions to change modifiable (but not writable through
     /// CSR instructions) bits of this register.
     void poke(URV x)
-    { *valuePtr_ = (x & pokeMask_) | (*valuePtr_ & ~pokeMask_); }
+    {
+      for (auto func : prePoke_)
+        func(*this, x);
+
+      URV newVal = (x & pokeMask_) | (*valuePtr_ & ~pokeMask_);
+      *valuePtr_ = newVal;
+
+      for (auto func : postPoke_)
+        func(*this, newVal);
+    }
 
     /// Return the value of this register before last sequence of
     /// writes. Return current value if no writes since
@@ -572,6 +668,7 @@ namespace WdRiscv
     bool implemented_ = false; // True if register is implemented.
     bool defined_ = false;
     bool debug_ = false;       // True if this is a debug-mode register.
+    bool shared_ = false;      // True if this is shared between harts.
     URV initialValue_ = 0;
     URV value_ = 0;
     URV prev_ = 0;
@@ -583,6 +680,14 @@ namespace WdRiscv
 
     URV writeMask_ = ~URV(0);
     URV pokeMask_ = ~URV(0);
+
+    std::vector<std::function<void(Csr<URV>&, URV)>> postPoke_;
+    std::vector<std::function<void(Csr<URV>&, URV)>> postWrite_;
+
+    std::vector<std::function<void(Csr<URV>&, URV&)>> prePoke_;
+    std::vector<std::function<void(Csr<URV>&, URV&)>> preWrite_;
+
+    std::vector<std::function<void(Csr<URV>&)>> postReset_;
   };
 
 
@@ -592,8 +697,8 @@ namespace WdRiscv
   {
   public:
 
-    friend class Core<uint32_t>;
-    friend class Core<uint64_t>;
+    friend class Hart<uint32_t>;
+    friend class Hart<uint64_t>;
 
     CsRegs();
     
@@ -602,12 +707,12 @@ namespace WdRiscv
     /// Return pointer to the control-and-status register
     /// corresponding to the given name or nullptr if no such
     /// register.
-    const Csr<URV>* findCsr(const std::string& name) const;
+    Csr<URV>* findCsr(const std::string& name);
 
     /// Return pointer to the control-and-status register
     /// corresponding to the given number or nullptr if no such
     /// register.
-    const Csr<URV>* findCsr(CsrNumber number) const;
+    Csr<URV>* findCsr(CsrNumber number);
 
     /// Set value to the value of the scr having the given number
     /// returning true on success.  Return false leaving value
@@ -789,12 +894,12 @@ namespace WdRiscv
     void reset();
 
     /// Configure CSR. Return true on success and false on failure.
-    bool configCsr(const std::string& name, bool implemented,
-		   URV resetValue, URV mask, URV pokeMask, bool debug);
+    bool configCsr(const std::string& name, bool implemented, URV resetValue,
+                   URV mask, URV pokeMask, bool debug, bool shared);
 
     /// Configure CSR. Return true on success and false on failure.
-    bool configCsr(CsrNumber csr, bool implemented,
-		   URV resetValue, URV mask, URV pokeMask, bool debug);
+    bool configCsr(CsrNumber csr, bool implemented, URV resetValue,
+                   URV mask, URV pokeMask, bool debug, bool shared);
 
     /// Configure machine mode performance counters returning true on
     /// success and false on failure. N consecutive counters starting
@@ -877,6 +982,11 @@ namespace WdRiscv
 
     bool isInterruptEnabled() const
     { return interruptEnable_; }
+
+    /// Tie the shared CSRs in this file to the corresponding CSRs in
+    /// the target CSR file making them share the same location for
+    /// their value.
+    void tieSharedCsrsTo(CsRegs<URV>& target);
 
     /// Tie CSR values of machine mode performance counters to the
     /// elements of the given vector so that when a counter in the
