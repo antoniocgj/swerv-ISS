@@ -5794,11 +5794,11 @@ Hart<URV>::execEcall(const DecodedInst*)
   auto secCause = SecondaryCause::NONE;
 
   if (privMode_ == PrivilegeMode::Machine)
-    initiateException(ExceptionCause::M_ENV_CALL, currPc_, 0, secCause);
+    initiateException(ExceptionCause::M_ENV_CALL, pc_, 0, secCause);
   else if (privMode_ == PrivilegeMode::Supervisor)
-    initiateException(ExceptionCause::S_ENV_CALL, currPc_, 0, secCause);
+    initiateException(ExceptionCause::S_ENV_CALL, pc_, 0, secCause);
   else if (privMode_ == PrivilegeMode::User)
-    initiateException(ExceptionCause::U_ENV_CALL, currPc_, 0, secCause);
+    initiateException(ExceptionCause::U_ENV_CALL, pc_, 0, secCause);
   else
     assert(0 and "Invalid privilege mode in execEcall");
 }
