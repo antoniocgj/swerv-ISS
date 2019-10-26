@@ -3203,6 +3203,10 @@ Hart<URV>::untilAddress(URV address, FILE* traceFile)
   bool success = true;
   bool doStats = instFreq_ or enableCounters_;
 
+#ifdef __EMSCRIPTEN__
+  int simEnableInterrupt = jsInterruptEnabled();
+#endif
+
   if (enableGdb_)
     handleExceptionForGdb(*this);
 
@@ -3221,6 +3225,18 @@ Hart<URV>::untilAddress(URV address, FILE* traceFile)
 	  loadAddrValid_ = false;
 	  triggerTripped_ = false;
 	  hasException_ = false;
+
+    
+#ifdef __EMSCRIPTEN__  
+    if(simEnableInterrupt){
+      InterruptCause cause;
+      if (isInterruptPossible(cause))
+      {
+        initiateInterrupt(cause, pc_);
+        ++cycleCount_;
+      }
+    }
+#endif
 
 	  ++counter;
 
