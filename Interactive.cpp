@@ -28,6 +28,19 @@
 
 using namespace WdRiscv;
 
+#ifdef __EMSCRIPTEN__
+
+#include <emscripten.h>
+
+EM_JS(const char *, readInteractiveCommand, (), {
+	var jsString = getInteractiveCommand();
+  var lengthBytes = lengthBytesUTF8(jsString)+1;
+  var stringOnWasmHeap = _malloc(lengthBytes);
+  stringToUTF8(jsString, stringOnWasmHeap, lengthBytes);
+  return stringOnWasmHeap;
+});
+
+#endif
 
 /// Return format string suitable for printing an integer of type URV
 /// in hexadecimal form.
@@ -1554,8 +1567,11 @@ Interactive<URV>::interact(FILE* traceFile, FILE* commandLog)
   while (not done)
     {
       errno = 0;
+      #ifdef __EMSCRIPTEN__
+      std::string line = readInteractiveCommand();
+      #else
       std::string line = linenoise::Readline(prompt);
-
+      #endif
       if (line.empty())
 	{
 	  if (std::cin.eof())
